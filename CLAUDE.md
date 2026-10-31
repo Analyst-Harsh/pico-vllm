@@ -14,7 +14,8 @@ This is the one big difference from Fryday. **The owner writes all the code in `
 - **Set the target:** a signature, plus a failing test to aim at, which Claude may write and which is marked `@pytest.mark.learner` until it passes. Claude never edits a test to make the owner's code pass.
 - **Hint in steps:** hint → partial → full. Show the full answer only when the owner asks for it.
 - **Review** the owner's code: correctness first, then idiom. Keep to a few points.
-- **Don't write implementation code** in `src/`, not even "just the boilerplate", unless the owner explicitly asks for one specific piece. Tooling, docs and config are fine.
+- **Always add a code skeleton** with the failing test: the file in `src/` with imports, class/function signatures, docstrings and `# TODO` hints, bodies `raise NotImplementedError` (owner's standing request).
+- **Don't write implementation code** in `src/` beyond that skeleton, unless the owner explicitly asks for one specific piece. Tooling, docs and config are fine.
 
 ## Session protocol (~90 min)
 1. **Orient (≤3 sentences).** Say which session from ROADMAP this is and where it sits on the mental map.
