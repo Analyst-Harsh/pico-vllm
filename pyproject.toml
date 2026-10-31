@@ -1,0 +1,52 @@
+[project]
+name = "pico-vllm"
+version = "0.1.0"
+description = "A tiny GPT from scratch, then a mini-vLLM on it: KV cache, paged KV, continuous batching, prefix caching."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.5.4",
+    "torch>=2.14.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["lefthook>=2.1", "pytest>=8", "ruff>=0.9"]
+
+[tool.uv]
+required-version = ">=0.11"
+
+# macOS gets the PyPI wheel (has MPS); Linux CI gets the small CPU-only wheel.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Learner tests are red until the owner's code passes; `make learner` runs them.
+addopts = "-m 'not learner' --strict-markers"
+markers = ["learner: owner's piece in progress; deselected by default, run with `make learner`"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["spikes"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "N", "S", "SIM", "RUF", "PT", "ARG", "PERF"]
+# torch idiom: `B, T, C = x.shape` and `from torch.nn import functional as F`
+ignore = ["N803", "N806", "N812"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true

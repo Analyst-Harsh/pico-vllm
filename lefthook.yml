@@ -1,0 +1,27 @@
+pre-commit:
+  parallel: false
+  commands:
+    ruff-format:
+      glob: "*.py"
+      exclude: ["spikes/**"]  # ruff ignores extend-exclude for explicit paths
+      run: uv run ruff format {staged_files}
+      stage_fixed: true
+    ruff-lint:
+      glob: "*.py"
+      exclude: ["spikes/**"]
+      run: uv run ruff check --fix {staged_files}
+      stage_fixed: true
+    # Needs gitleaks >= 8.19 on PATH (brew install gitleaks).
+    gitleaks:
+      run: gitleaks git --pre-commit --staged --redact --verbose
+
+# pre-push is the full-repo safety net: check-only, plus the whole test suite.
+pre-push:
+  parallel: true
+  commands:
+    ruff-format-check:
+      run: uv run ruff format --check .
+    ruff-lint:
+      run: uv run ruff check .
+    pytest:
+      run: uv run pytest -q
