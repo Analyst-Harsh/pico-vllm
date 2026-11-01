@@ -11,6 +11,21 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-02: head-count sweep, n_head 1 / 4 / 8 (F5 step 5), null result
+- **Question:** at a fixed width (n_embd 128), does splitting attention into more, smaller heads change val loss?
+- **Setup:** as run B (`gpt-m-nodrop`): 816,705 params in every run (n_head doesn't change the count), ctx 64, B=32, 5000 iters, lr 1e-3, no dropout, seed 1337, Apple M5, torch 2.15.0, MPS. `--model gpt-m-h1` / `gpt-m-nodrop` / `gpt-m-h8`. Branch `f5` after 6058af0 (config lines uncommitted at run time).
+- **Prediction:** 4 heads best, then 8, then 1.
+- **Result:**
+
+  | n_head | head_size | final train | final val | best val (step) | wall time (indicative) |
+  |---|---|---|---|---|---|
+  | 1 | 128 | 1.3657 | 1.5858 | 1.5858 (4999) | 76 s |
+  | 4 | 32 | 1.3436 | 1.5851 | 1.5851 (4999) | 110 s |
+  | 8 | 16 | 1.3372 | 1.5846 | 1.5784 (4500) | 158 s |
+
+- **Observations:** final val is identical to within **0.001**, far below the ~0.01 step-to-step noise of `estimate_loss`. So no measurable difference: the ranking can't be judged from one seed. Small, consistent hint: more heads give slightly lower *train* loss (1.366 → 1.337) and the best *val* point (8 heads, 1.578). Wall time nearly doubles per 2× heads: our `MultiHeadAttention` runs heads in a **Python loop**, so MPS pays launch overhead per head, the same cost a batched implementation (one matmul for all heads) avoids.
+- **Decision:** keep 4 heads (`gpt-m-nodrop.pt` stays the checkpoint). At this size head count doesn't matter; it would need several seeds and a bigger model to separate them. Added a "Gaps vs vLLM" note: per-head Python loop instead of batched heads.
+
 ## 2026-11-02: what the heads look at (F5 step 4)
 - **Question:** which earlier characters do the trained heads attend to?
 - **Setup:** `checkpoints/gpt-m-nodrop.pt` on CPU. `wei` recomputed from each head's own key/query on `ln1(x)` of its Block. Stats: 200 random val windows of T=64, positions t ≥ 8, mean attention mass per category. Heatmap: Block 3 on `"ROMEO:\nWhat is the matter, man?"`. `uv run --with matplotlib`, script and PNG in the session scratchpad (not committed). Seed 1337. Branch `f5` after ce838c5.

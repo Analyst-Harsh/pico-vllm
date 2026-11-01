@@ -57,6 +57,7 @@ What a production engine does that this one doesn't. Same columns as Fryday's `p
 | Context length | RoPE, long context | learned position embedding, so prompt + output ≤ `ctx_len` (`max_model_len`) | the engine must enforce it | why RoPE generalises and learned embeddings don't | setup |
 | Serving surface | OpenAI API server, tensor parallelism, many processes | single process, in-memory | — | how it would sit behind Fryday's OpenAI contract | setup |
 | Tokenizer | BPE | characters | fine for learning | why BPE changes the KV math | setup |
+| Attention heads | all heads in one batched matmul: q, k, v shaped `(B, n_head, T, head_size)`, fused SDPA / FlashAttention | a Python loop over `Head` modules, then `torch.cat` | 8 heads took 2× the wall time of 4 at equal params (EXPERIMENTS 2026-11-02); per-step overhead in v9 | why real code reshapes to a head dimension instead of looping | F5 |
 | Type checking | strict type checker in CI | ruff only (torch types fight strict pyright) | low risk at this size | where types earn their keep | setup |
 
 ## vLLM mapping (v9 B5)

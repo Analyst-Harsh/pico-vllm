@@ -1,6 +1,6 @@
 """F4/F5: train a model on tiny-shakespeare.
 
-Run: uv run python -m pico_vllm.train --model {bigram,head,gpt,gpt-drop,gpt-m,gpt-m-nodrop}
+Run: uv run python -m pico_vllm.train --model <name in CONFIGS>
 """
 
 import argparse
@@ -35,6 +35,9 @@ CONFIGS = {
 CONFIGS["gpt-drop"] = {**CONFIGS["gpt"], "dropout": 0.2}  # A: same size + dropout
 CONFIGS["gpt-m"] = {**CONFIGS["gpt-drop"], "T": 64, "n_embd": 128}  # B: wider, longer ctx
 CONFIGS["gpt-m-nodrop"] = {**CONFIGS["gpt-m"], "dropout": 0.0}  # B without dropout
+# F5 step 5: head-count sweep (same params; only how attention is split changes)
+CONFIGS["gpt-m-h1"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 1}
+CONFIGS["gpt-m-h8"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 8}
 
 
 def pick_device() -> str:
