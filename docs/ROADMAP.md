@@ -55,6 +55,7 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 | 2 | Train on MPS. Start smaller than Karpathy's 384/6/6/256 and scale up if time allows. Save `checkpoints/gpt.pt` (v9 needs it). | val loss falls | wall time and final val loss (Karpathy's ~1.48 was on an A100) |
 | 3 | ✍️ `sample.py::sample_next(logits, temperature=1.0, top_k=None)`, the sampler, moved here from Fryday v0 | temperature → 0 is greedy; top-k never picks outside the k; rows are valid distributions | what temperature 0.5 vs 1.5 sounds like |
 | 4 | Print or plot one head's attention weights (`uv run --with matplotlib`, no new dependency) | — | which tokens a head attends to |
+| 5 | Head-count sweep: same width and steps, `n_head` = 1, 4, 8 (head_size 32, 8, 4). One EXPERIMENTS entry | — | which wins, and does a tiny head_size hurt? |
 
 **Exit criteria:** a 500-character sample and the val loss in EXPERIMENTS; `make test` green; the checkpoint saved locally.
 
@@ -89,6 +90,12 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 - [Lilian Weng, *Large Transformer Model Inference Optimization*](https://lilianweng.github.io/posts/2023-01-10-inference-optimization/)
 - TTFT, TPOT, throughput vs latency, Little's law, goodput. Depth: [Umar Jamil, *Flash Attention*](https://www.youtube.com/watch?v=zy8ChVd_oTM).
 - **Exit:** the metric definitions are filled in in DESIGN.md.
+
+## v9 B0: batched attention heads (prep for the KV cache)
+- **✍️ Write:** `CausalSelfAttention` in place of the `Head` loop: one `Linear(n_embd, 3 * n_embd)` for q, k, v, then `.view(B, T, n_head, head_size).transpose(1, 2)` so every head runs in one matmul. Retrain (or convert) the checkpoint.
+- **Test:** same output as the looped `MultiHeadAttention` when given the same weights.
+- **Predict:** wall time for 4 and 8 heads (looped: 110 s and 158 s, EXPERIMENTS 2026-11-02).
+- **Why here:** the KV cache in B1 and the pool in B2 are shaped `(…, n_head, …, head_size)`, so heads must already be a tensor dimension.
 
 ## v9 B1: KV cache
 - **✍️ Write:** `forward(idx, kv_cache, start_pos)` and cached generation.
@@ -126,6 +133,67 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 - **Exit:** a mapping table in DESIGN.md (their class or function → ours).
 
 **Stays in Fryday:** the vllm-metal vs `mlx_lm.server` comparison (1-session timebox), the OpenAI-contract swap, and the v9 interview session.
+
+---
+
+## Enhancements backlog (optional, after the core path)
+
+F4–F5 built the simplest GPT that teaches the ideas. This is what a production model and training setup would add. Serving-side gaps (paging kernel, scheduler, preemption, chunked prefill, API) live in [DESIGN.md "Gaps vs vLLM"](DESIGN.md#gaps-vs-vllm). Pick items one at a time, each with a prediction and an EXPERIMENTS entry.
+
+**Model architecture**
+
+| Change | What it replaces | Why | When |
+|---|---|---|---|
+| Batched heads | Python loop over `Head` | one matmul for all heads; needed for KV-cache shapes | **v9 B0** (above) |
+| Fused attention, `F.scaled_dot_product_attention(is_causal=True)` | hand-written mask + softmax | FlashAttention-style kernel, less memory | after B0 |
+| RMSNorm | LayerNorm | cheaper, used by Llama | F6 optional |
+| RoPE | learned position table | no hard `ctx_len` limit; relative positions | F6 optional |
+| GQA (`n_kv_head < n_head`) | one k, v per head | smaller KV cache | F6 optional; pays off in v9 |
+| SwiGLU (or GELU) | ReLU FFN | better loss per parameter (Llama, GPT-2) | any time |
+| Weight tying (`lm_head.weight = token_embedding.weight`) | separate lm_head | fewer params, often better | any time |
+| Scaled init for residual projections (std 0.02/√(2·n_layer)) | plain std 0.02 | keeps deep stacks stable | with more layers |
+| No biases in Linear / LayerNorm | biases everywhere | small speed and stability win (nanoGPT option) | any time |
+
+**Training**
+
+| Change | What it replaces | Why | When |
+|---|---|---|---|
+| LR warmup + cosine decay | constant lr 1e-3 | faster, more stable convergence | before scaling up |
+| Gradient clipping (norm 1.0) | none | guards against loss spikes | before scaling up |
+| AdamW weight decay on matrices only | default decay on everything | norms and biases shouldn't decay | before scaling up |
+| Mixed precision (`torch.autocast`, bf16) | fp32 | ~2× less memory, faster on real GPUs | when scaling up |
+| `torch.compile` | eager mode | fewer kernel launches (helps MPS overhead) | when timing matters |
+| Gradient accumulation | B=32 per step | large effective batch on small memory | when scaling up |
+| Early stopping on val + keep best checkpoint | save the last step | avoids overfit checkpoints | when val stalls (run B) |
+| Resumable checkpoints (optimizer state, step, RNG) | weights + config only | restart long runs | long runs |
+| Several seeds per experiment | one seed | the head-count sweep was within noise | any comparison closer than ~0.02 |
+
+**Inference and sampling**
+
+| Change | What it replaces | Why | When |
+|---|---|---|---|
+| KV cache | recompute the whole window | O(1) work per new token | **v9 B1** |
+| Top-p (nucleus), min-p | top-k only | adapts the cut-off to the distribution | any time |
+| Repetition / frequency penalty | none | greedy loops ("the state of the state…") | any time |
+| Stop sequences, max length, EOS | fixed `max_new_tokens` | real requests end on their own | v9 B3 (`Sequence` finishes) |
+| Per-request seeds | one global generator | reproducible requests in a batch | v9 B3 |
+
+**Data and tokenizer**
+
+| Change | What it replaces | Why | When |
+|---|---|---|---|
+| BPE (`tiktoken` or trained) | characters | ~4× shorter sequences, real-world KV maths | after v9, or a v9 stretch |
+| Pre-tokenised `uint16` memmap file | encode the whole text into a Python list each run | fast startup, larger datasets | with a bigger dataset |
+| Bigger corpus | tiny-shakespeare (1 MB) | room for bigger models without overfitting | when the model outgrows it |
+
+**Engineering**
+
+| Change | What it replaces | Why | When |
+|---|---|---|---|
+| `@dataclass GPTConfig` | plain dicts in `train.py` | typed, saved with the checkpoint, one source of truth | before v9 loads checkpoints |
+| `safetensors` checkpoints + saved tokenizer | `torch.save` pickle | safe to load, portable | before sharing checkpoints |
+| Experiment logging (CSV or TensorBoard) | printed lines | loss curves you can compare | when runs multiply |
+| Expose attention weights (`return_attn=True`) | recompute in a script | inspection without duplicate code | if we inspect heads again |
 
 ---
 
