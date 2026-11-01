@@ -46,3 +46,15 @@ def test_param_count_matches_formula(gpt: GPT) -> None:
 def test_generate_past_ctx_len(gpt: GPT) -> None:
     out = gpt.generate(torch.zeros((B, 1), dtype=torch.long), max_new_tokens=2 * CTX)
     assert out.shape == (B, 1 + 2 * CTX)
+
+
+def test_generate_greedy_is_deterministic(gpt: GPT) -> None:
+    idx = torch.zeros((B, 1), dtype=torch.long)
+    a = gpt.generate(idx, max_new_tokens=10, temperature=0.0)
+    b = gpt.generate(idx, max_new_tokens=10, temperature=0.0)
+    assert torch.equal(a, b)
+
+
+def test_generate_respects_top_k(gpt: GPT) -> None:
+    out = gpt.generate(torch.zeros((B, 1), dtype=torch.long), max_new_tokens=5, top_k=1)
+    assert torch.equal(out, gpt.generate(torch.zeros((B, 1), dtype=torch.long), 5, 0.0))

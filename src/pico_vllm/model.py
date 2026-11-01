@@ -4,6 +4,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from pico_vllm.sample import sample_next
+
 
 class Head(nn.Module):
     """One head of causal self-attention: each token takes a weighted average of past values."""
@@ -131,12 +133,19 @@ class GPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx: Tensor, max_new_tokens: int) -> Tensor:
+    def generate(
+        self,
+        idx: Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
         """Crop to ctx_len, predict, sample, append. v9 B1 makes this fast with a KV cache."""
         for _ in range(max_new_tokens):
             logits, _ = self(idx[:, -self.ctx_len :])
-            probs = F.softmax(logits[:, -1, :], dim=-1)
-            idx = torch.cat((idx, torch.multinomial(probs, num_samples=1)), dim=1)
+            idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)
+            idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
 

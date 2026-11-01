@@ -11,6 +11,18 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-02: temperature and top-k on the best checkpoint (F5)
+- **Question:** what do temperature 0 / 0.5 / 1.0 / 1.5 and top-k 5 sound like?
+- **Setup:** `checkpoints/gpt-m-nodrop.pt` (817K, val 1.585) on CPU, prompt `"ROMEO:\n"`, 200 new chars, `torch.Generator().manual_seed(1337)` per setting. Branch `f5` after 7530fd7 (uncommitted). Script in the session scratchpad (not committed).
+- **Prediction:** asked in ROADMAP; none given before the run.
+- **Result (qualitative, n=1 sample each):**
+  - **0.0 (greedy):** loops immediately: "What is the state of the state of the state?" repeated with "Second Servingman:".
+  - **0.5:** fluent, safe, generic ("the prince of the s…"); few invented words.
+  - **1.0:** varied, real names (HENRY VI, POMPHEY), some invented words.
+  - **1.5:** breaks down into non-words ("Cpruto-mocket", "lrzes", "Eveg-gpoevery").
+  - **1.0 + top-k 5:** the best mix: varied but rarely broken; FRIAR LAURENCE, dialogue layout.
+- **Decision:** greedy for engine tests (deterministic, v9 compares outputs exactly); temperature ~0.8–1.0 with top-k for demos.
+
 ## 2026-11-02: run B, wider GPT + ctx 64, dropout 0.2 vs 0 (F5)
 - **Question:** does 4× capacity (n_embd 128) and 2× context (ctx_len 64) beat val 1.73, and does dropout help at this size?
 - **Setup:** Apple M5, torch 2.15.0, MPS. `GPT(65, n_embd=128, n_head=4, n_layer=4, ctx_len=64)`, **816,705** params. B=32, T=64, AdamW lr=1e-3, 5000 iters, eval 200 batches per split. Seed 1337. Branch `f5` after 7bdda62 (uncommitted). `--model gpt-m` (dropout 0.2) and `--model gpt-m-nodrop` (0.0). Saved `checkpoints/gpt-m.pt`, `checkpoints/gpt-m-nodrop.pt`.
