@@ -25,7 +25,7 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 
 **Learn:**
 - ⭐ [Karpathy, *Let's build GPT: from scratch, in code, spelled out*](https://www.youtube.com/watch?v=kCc8FmEb1nY), from the start through the chapter "version 4: self-attention".
-- Warm-up: `uv run spikes/f4_pytorch_primer.py` (tensors, `(B, T, C)` shapes, `nn.Embedding`, `nn.Linear`, softmax).
+- Warm-up: open `spikes/f4_pytorch_primer.ipynb` (kernel: `.venv`) and run cell by cell (tensors, `(B, T, C)` shapes, `nn.Embedding`, `nn.Linear`, softmax).
 
 **Build:**
 
