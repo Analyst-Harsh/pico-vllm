@@ -1,17 +1,23 @@
-"""F4: train a model on tiny-shakespeare.  Run: uv run python -m pico_vllm.train"""
+"""F4: train a model on tiny-shakespeare.
 
+Run: uv run python -m pico_vllm.train --model {bigram,head}
+"""
+
+import argparse
 from pathlib import Path
 
 import torch
 from torch import Tensor, nn
 
 from pico_vllm.data import CharTokenizer, get_batch, train_val_split
-from pico_vllm.model import BigramLanguageModel
+from pico_vllm.model import BigramLanguageModel, SingleHeadLanguageModel
 
 SEED = 1337
-B, T = 32, 8
-MAX_ITERS, EVAL_INTERVAL, EVAL_ITERS = 3000, 300, 200
-LR = 1e-2
+B, T = 32, 8  # T is also the model's ctx_len
+EVAL_ITERS = 200
+N_EMBD = 32
+# per model: (max_iters, lr). Attention trains slower, so smaller lr and more steps.
+CONFIGS = {"bigram": (3000, 1e-2), "head": (5000, 1e-3)}
 
 
 def pick_device() -> str:
@@ -35,6 +41,12 @@ def estimate_loss(model: nn.Module, splits: dict[str, Tensor], device: str) -> d
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", choices=CONFIGS, default="head")
+    name = parser.parse_args().model
+    max_iters, lr = CONFIGS[name]
+    eval_interval = max_iters // 10
+
     torch.manual_seed(SEED)
     device = pick_device()
     text = Path("data/input.txt").read_text()
@@ -44,11 +56,15 @@ def main() -> None:
     train, val = train_val_split(data)
     splits = {"train": train, "val": val}
 
-    model = BigramLanguageModel(tok.vocab_size).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+    if name == "bigram":
+        model: nn.Module = BigramLanguageModel(tok.vocab_size)
+    else:
+        model = SingleHeadLanguageModel(tok.vocab_size, n_embd=N_EMBD, ctx_len=T)
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    for step in range(MAX_ITERS):
-        if step % EVAL_INTERVAL == 0 or step == MAX_ITERS - 1:
+    for step in range(max_iters):
+        if step % eval_interval == 0 or step == max_iters - 1:
             losses = estimate_loss(model, splits, device)
             print(f"step {step:4d}: train {losses['train']:.4f}, val {losses['val']:.4f}")
 

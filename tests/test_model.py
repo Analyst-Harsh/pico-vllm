@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.model import BigramLanguageModel
+from pico_vllm.model import BigramLanguageModel, SingleHeadLanguageModel
 
 V, B, T = 10, 2, 5
 
@@ -37,3 +37,14 @@ def test_generate_appends_tokens(model: BigramLanguageModel) -> None:
     assert torch.equal(out[:, :1], idx)  # the prompt is kept
     assert out.min() >= 0
     assert out.max() < V
+
+
+def test_single_head_model_shapes_and_long_generation() -> None:
+    torch.manual_seed(1337)
+    m = SingleHeadLanguageModel(V, n_embd=8, ctx_len=4)
+    idx = torch.randint(V, (B, 4))
+    logits, loss = m(idx, idx)
+    assert logits.shape == (B, 4, V)
+    assert torch.isfinite(loss)
+    out = m.generate(idx[:, :1], max_new_tokens=10)  # runs past ctx_len: must crop
+    assert out.shape == (B, 11)
