@@ -11,6 +11,29 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-02: what the heads look at (F5 step 4)
+- **Question:** which earlier characters do the trained heads attend to?
+- **Setup:** `checkpoints/gpt-m-nodrop.pt` on CPU. `wei` recomputed from each head's own key/query on `ln1(x)` of its Block. Stats: 200 random val windows of T=64, positions t ≥ 8, mean attention mass per category. Heatmap: Block 3 on `"ROMEO:\nWhat is the matter, man?"`. `uv run --with matplotlib`, script and PNG in the session scratchpad (not committed). Seed 1337. Branch `f5` after ce838c5.
+- **Prediction:** heads look at the start of the current word.
+- **Result (attention mass; rows sum to 1, categories overlap):**
+
+  | Head | self | prev char | word's 1st char | space/newline | > 8 back |
+  |---|---|---|---|---|---|
+  | L0 H0 | 0.17 | **0.55** | 0.18 | 0.21 | 0.07 |
+  | L1 H3 | 0.15 | 0.19 | 0.04 | **0.80** | 0.11 |
+  | L2 H3 | 0.06 | 0.05 | 0.04 | 0.49 | **0.56** |
+  | L3 H0–H3 | 0.11–0.19 | 0.09–0.19 | 0.05–0.12 | 0.11–0.27 | **0.26–0.40** |
+
+  | **uniform baseline** (equal weight on every visible char) | 0.04 | 0.04 | 0.04 | 0.19 | 0.67 |
+
+  No head puts more than 0.19 on the word's first character.
+- **Observations (corrected after adding the uniform baseline):**
+  - **Previous-char head:** L0 H0 = 0.55, 15× uniform. Strong.
+  - **Boundary head:** L1 H3 = 0.80 on spaces/newlines, 4× uniform: it finds the **boundary before** the word.
+  - **Word start:** 0.15–0.19 in L0 and L1 H2, about 4–5× uniform. So the prediction is weakly supported: some heads lean towards the word's first letter, but none specialises in it.
+  - **No head is "long-range":** every head is *below* the uniform 0.67 for "> 8 back". Block 3 is just more spread out (diffuse), not reaching further. An earlier draft of this entry said "later Blocks look further back"; that was wrong without the baseline.
+- **Decision:** none needed; this is understanding. Lesson: always compare attention stats with a uniform baseline.
+
 ## 2026-11-02: temperature and top-k on the best checkpoint (F5)
 - **Question:** what do temperature 0 / 0.5 / 1.0 / 1.5 and top-k 5 sound like?
 - **Setup:** `checkpoints/gpt-m-nodrop.pt` (817K, val 1.585) on CPU, prompt `"ROMEO:\n"`, 200 new chars, `torch.Generator().manual_seed(1337)` per setting. Branch `f5` after 7530fd7 (uncommitted). Script in the session scratchpad (not committed).
