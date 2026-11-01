@@ -55,6 +55,7 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 | 2 | Train on MPS. Start smaller than Karpathy's 384/6/6/256 and scale up if time allows. Save `checkpoints/gpt.pt` (v9 needs it). | val loss falls | wall time and final val loss (Karpathy's ~1.48 was on an A100) |
 | 3 | ✍️ `sample.py::sample_next(logits, temperature=1.0, top_k=None)`, the sampler, moved here from Fryday v0 | temperature → 0 is greedy; top-k never picks outside the k; rows are valid distributions | what temperature 0.5 vs 1.5 sounds like |
 | 4 | Print or plot one head's attention weights (`uv run --with matplotlib`, no new dependency) | — | which tokens a head attends to |
+| 5 | Head-count sweep: same width and steps, `n_head` = 1, 4, 8 (head_size 32, 8, 4). One EXPERIMENTS entry | — | which wins, and does a tiny head_size hurt? |
 
 **Exit criteria:** a 500-character sample and the val loss in EXPERIMENTS; `make test` green; the checkpoint saved locally.
 

@@ -1,6 +1,6 @@
-"""F4: train a model on tiny-shakespeare.
+"""F4/F5: train a model on tiny-shakespeare.
 
-Run: uv run python -m pico_vllm.train --model {bigram,head}
+Run: uv run python -m pico_vllm.train --model {bigram,head,gpt,gpt-drop,gpt-m,gpt-m-nodrop}
 """
 
 import argparse
@@ -10,14 +10,31 @@ import torch
 from torch import Tensor, nn
 
 from pico_vllm.data import CharTokenizer, get_batch, train_val_split
-from pico_vllm.model import BigramLanguageModel, SingleHeadLanguageModel
+from pico_vllm.model import GPT, BigramLanguageModel, SingleHeadLanguageModel
 
 SEED = 1337
-B, T = 32, 8  # T is also the model's ctx_len
 EVAL_ITERS = 200
-N_EMBD = 32
-# per model: (max_iters, lr). Attention trains slower, so smaller lr and more steps.
-CONFIGS = {"bigram": (3000, 1e-2), "head": (5000, 1e-3)}
+CHECKPOINT_DIR = Path("checkpoints")
+
+# Per model. T (batch window) is also the model's ctx_len.
+CONFIGS = {
+    "bigram": {"B": 32, "T": 8, "max_iters": 3000, "lr": 1e-2},
+    "head": {"B": 32, "T": 8, "max_iters": 5000, "lr": 1e-3, "n_embd": 32},
+    "gpt": {
+        "B": 32,
+        "T": 32,
+        "max_iters": 5000,
+        "lr": 1e-3,
+        "n_embd": 64,
+        "n_head": 4,
+        "n_layer": 4,
+        "dropout": 0.0,
+    },
+}
+# F5 scaling, one change at a time (EXPERIMENTS 2026-11-02)
+CONFIGS["gpt-drop"] = {**CONFIGS["gpt"], "dropout": 0.2}  # A: same size + dropout
+CONFIGS["gpt-m"] = {**CONFIGS["gpt-drop"], "T": 64, "n_embd": 128}  # B: wider, longer ctx
+CONFIGS["gpt-m-nodrop"] = {**CONFIGS["gpt-m"], "dropout": 0.0}  # B without dropout
 
 
 def pick_device() -> str:
@@ -25,7 +42,9 @@ def pick_device() -> str:
 
 
 @torch.no_grad()
-def estimate_loss(model: nn.Module, splits: dict[str, Tensor], device: str) -> dict[str, float]:
+def estimate_loss(
+    model: nn.Module, splits: dict[str, Tensor], B: int, T: int, device: str
+) -> dict[str, float]:
     """Average loss over EVAL_ITERS batches for each split. Less noisy than one batch."""
     model.eval()
     out = {}
@@ -40,11 +59,29 @@ def estimate_loss(model: nn.Module, splits: dict[str, Tensor], device: str) -> d
     return out
 
 
+def build(
+    name: str, vocab_size: int, cfg: dict
+) -> BigramLanguageModel | SingleHeadLanguageModel | GPT:
+    if name == "bigram":
+        return BigramLanguageModel(vocab_size)
+    if name == "head":
+        return SingleHeadLanguageModel(vocab_size, n_embd=cfg["n_embd"], ctx_len=cfg["T"])
+    return GPT(
+        vocab_size,
+        n_embd=cfg["n_embd"],
+        n_head=cfg["n_head"],
+        n_layer=cfg["n_layer"],
+        ctx_len=cfg["T"],
+        dropout=cfg["dropout"],
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=CONFIGS, default="head")
+    parser.add_argument("--model", choices=CONFIGS, default="gpt")
     name = parser.parse_args().model
-    max_iters, lr = CONFIGS[name]
+    cfg = CONFIGS[name]
+    B, T, max_iters = cfg["B"], cfg["T"], cfg["max_iters"]
     eval_interval = max_iters // 10
 
     torch.manual_seed(SEED)
@@ -56,16 +93,13 @@ def main() -> None:
     train, val = train_val_split(data)
     splits = {"train": train, "val": val}
 
-    if name == "bigram":
-        model: nn.Module = BigramLanguageModel(tok.vocab_size)
-    else:
-        model = SingleHeadLanguageModel(tok.vocab_size, n_embd=N_EMBD, ctx_len=T)
-    model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    model = build(name, tok.vocab_size, cfg).to(device)
+    print(f"{name}: {sum(p.numel() for p in model.parameters()):,} params on {device}")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"])
 
     for step in range(max_iters):
         if step % eval_interval == 0 or step == max_iters - 1:
-            losses = estimate_loss(model, splits, device)
+            losses = estimate_loss(model, splits, B, T, device)
             print(f"step {step:4d}: train {losses['train']:.4f}, val {losses['val']:.4f}")
 
         x, y = get_batch(train, B, T, device)
@@ -73,6 +107,12 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+
+    if isinstance(model, GPT):  # v9 serves one of these
+        path = CHECKPOINT_DIR / f"{name}.pt"
+        path.parent.mkdir(exist_ok=True)
+        torch.save({"model": model.state_dict(), "config": cfg, "chars": tok.itos}, path)
+        print(f"saved {path}")
 
     prompt = torch.zeros((1, 1), dtype=torch.long, device=device)  # id 0 = '\n'
     print(tok.decode(model.generate(prompt, max_new_tokens=500)[0].tolist()))
