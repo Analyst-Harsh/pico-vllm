@@ -70,7 +70,23 @@ flowchart LR
 | Metrics | see below | planned (B3) |
 
 ## Metrics (v9 learn 3)
-TBD: TTFT and TPOT (in steps), tokens/step, batch utilisation, padding waste, prefix-cache hit rate.
+One request: `arrival │ queue │ prefill │ tok1 │ tok2 │ … │ tokN`. **TTFT** = arrival → tok1, **TPOT** = gap between tokens, **E2E** = TTFT + (N−1)·TPOT.
+
+On MPS, wall-clock time for this tiny model is mostly launch overhead (EXPERIMENTS 2026-11-10), so the engine is measured in **steps** first. One step = one `Scheduler.step()` = one forward over the running batch.
+
+| Metric | Definition (ours) | Production equivalent | Build |
+|---|---|---|---|
+| TTFT | steps from `add_request` to its first output token | ms; queue wait + prefill | B3 |
+| TPOT | decode steps per output token after the first (1.0 when never preempted or paused) | ms per token; decode step time | B3 |
+| tokens/step | output tokens produced in a step, averaged over the run | tokens/s throughput | B3 |
+| batch utilisation | running sequences ÷ `max_num_seqs`, averaged over steps | GPU busy fraction | B3 |
+| padding waste | static batching: slots spent on finished or padded sequences ÷ all slots | — (what continuous batching removes) | B3 |
+| KV block usage | blocks in use ÷ `num_blocks`; plus preemptions, if implemented | KV cache usage % in vLLM's metrics | B2, B3 |
+| prefix-cache hit rate | prompt tokens served from shared blocks ÷ all prompt tokens | same | B4 |
+| goodput | requests meeting a TTFT and TPOT budget (in steps) ÷ all requests | throughput within the SLO | B3 |
+| wall-clock | real seconds, always labelled **indicative** | ms | all |
+
+**Rules:** report p50 and p99, never only the mean. Every run uses `bench.py`'s seeded workload. Sizing check (Little's law): in-flight sequences = arrival rate × steps per request, and each one holds its KV blocks.
 
 ## Gaps vs vLLM
 What a production engine does that this one doesn't. Same columns as Fryday's `production-gaps.md`.

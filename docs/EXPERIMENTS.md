@@ -11,6 +11,20 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-11: KV cache vs recompute (v9 B1)
+- **Question:** how much faster is `generate_cached` than `generate`, and does per-token cost grow with position?
+- **Setup:** Apple M5, torch 2.15.0. `checkpoints/gpt-m-gqa2.pt` (ModernGPT, RMSNorm, 4 query / 2 k/v heads, ctx_len 64), batch 1, prompt = 1 token, greedy. Median of 5 runs after a warm-up, MPS (with `torch.mps.synchronize`) and CPU. Branch `v9` after 914d11c (uncommitted). Script in the session scratchpad (`time_kv.py`).
+- **Prediction:** not given.
+- **Result:** outputs identical (also checked for `gpt-m-rms`). Token positions pushed through the model for 63 new tokens: **2,016 without the cache, 63 with it** (1 + 63 counting the prompt).
+
+  | Device | new tokens | generate | cached | speed-up |
+  |---|---|---|---|---|
+  | MPS | 15 / 31 / 63 | 2.53 / 2.28 / 2.39 ms/tok | 2.00 / 2.00 / 2.22 ms/tok | 1.3× / 1.1× / 1.1× |
+  | CPU | 15 / 31 / 63 | 0.38 / 0.40 / 0.46 ms/tok | 0.33 / 0.33 / 0.33 ms/tok | 1.2× / 1.2× / 1.4× |
+
+- **Observations:** 32× less work, but only 1.1–1.4× faster. The shape is right on CPU: uncached ms/token grows with position (0.38 → 0.46), cached stays flat (0.33). The size isn't: for a 750K-param model, pushing 64 positions through instead of 1 is almost free, and each step's cost is the fixed ~50 kernel launches plus Python, which the cache doesn't remove. MPS is ~6× slower than CPU here (launch overhead again), and its per-step time is flat at ~2 ms whatever the work.
+- **Decision:** B1 is correct and does what it should (work per token constant). Its speed win needs a model where compute or memory per step dominates. In the engine, measure tokens/step and work, not wall-clock. The cache's real role in v9 is enabling batching: B2/B3 build on it.
+
 ## 2026-11-10: GQA, n_kv_head 4 / 2 / 1 (F6 step 3)
 - **Question:** how much val loss do we pay for sharing k/v heads (4 query heads throughout)?
 - **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True, n_kv_head=…)`, otherwise `gpt-m-rms` (n_embd 128, n_head 4, n_layer 4, ctx_len 64, 5000 iters). Attention is now always `GroupedQueryAttention` (n_kv 4 = plain MHA via `repeat_interleave(1)`). Seed 1337. Branch `f6` after ce5ada2 (uncommitted). `--model gpt-m-rms`, `gpt-m-gqa2`, `gpt-m-gqa1`, run one after the other.
