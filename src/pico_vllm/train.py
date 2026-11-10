@@ -11,6 +11,7 @@ from torch import Tensor, nn
 
 from pico_vllm.data import CharTokenizer, get_batch, train_val_split
 from pico_vllm.model import GPT, BigramLanguageModel, SingleHeadLanguageModel
+from pico_vllm.modern import ModernGPT
 
 SEED = 1337
 EVAL_ITERS = 200
@@ -38,6 +39,14 @@ CONFIGS["gpt-m-nodrop"] = {**CONFIGS["gpt-m"], "dropout": 0.0}  # B without drop
 # F5 step 5: head-count sweep (same params; only how attention is split changes)
 CONFIGS["gpt-m-h1"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 1}
 CONFIGS["gpt-m-h8"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 8}
+# F6 step 1: batched heads (modern.py), same configs as the looped runs above
+CONFIGS["gpt-m-csa"] = {**CONFIGS["gpt-m-nodrop"], "modern": True}
+CONFIGS["gpt-m-csa-h8"] = {**CONFIGS["gpt-m-h8"], "modern": True}
+# F6 step 2: RMSNorm in place of every LayerNorm
+CONFIGS["gpt-m-rms"] = {**CONFIGS["gpt-m-csa"], "rmsnorm": True}
+# F6 step 3: GQA, query heads stay 4, k/v heads 2 and 1 (4 = gpt-m-rms)
+CONFIGS["gpt-m-gqa2"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 2}
+CONFIGS["gpt-m-gqa1"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 1}
 
 
 def pick_device() -> str:
@@ -69,14 +78,16 @@ def build(
         return BigramLanguageModel(vocab_size)
     if name == "head":
         return SingleHeadLanguageModel(vocab_size, n_embd=cfg["n_embd"], ctx_len=cfg["T"])
-    return GPT(
-        vocab_size,
-        n_embd=cfg["n_embd"],
-        n_head=cfg["n_head"],
-        n_layer=cfg["n_layer"],
-        ctx_len=cfg["T"],
-        dropout=cfg["dropout"],
-    )
+    sizes = {k: cfg[k] for k in ("n_embd", "n_head", "n_layer", "dropout")}
+    if cfg.get("modern"):
+        return ModernGPT(
+            vocab_size,
+            ctx_len=cfg["T"],
+            rmsnorm=cfg.get("rmsnorm", False),
+            n_kv_head=cfg.get("n_kv_head"),
+            **sizes,
+        )
+    return GPT(vocab_size, ctx_len=cfg["T"], **sizes)
 
 
 def main() -> None:

@@ -52,6 +52,7 @@ What a production engine does that this one doesn't. Same columns as Fryday's `p
 |---|---|---|---|---|---|
 | Attention kernel | fused PagedAttention CUDA kernel | torch gather on MPS | learning the memory layout, not speed | "The block table is the idea; the kernel is an optimisation of the gather." | setup |
 | Scheduler overhead | CUDA graphs, overlap of CPU scheduling with GPU work | plain Python each step | only matters at real throughput | where the step time goes | setup |
+| GQA k/v sharing | the kernel indexes k/v head `i // group` straight from the cache, no copy | no k/v copy (query groups folded into rows, F6), but plain torch ops: scores, mask, softmax and `@ v` are separate kernels | a fused kernel does it in one pass; matters at decode throughput | "GQA saves cache memory *and* bandwidth, but only if the kernel never materialises the repeat." | F6 |
 | Preemption | swap or recompute when memory runs out | reject or wait (recompute is a stretch goal) | long-tail requests | vLLM's recompute vs swap choice | setup |
 | Chunked prefill | splits long prompts across steps | whole prefill in one step | TTFT for other requests | prefill/decode interference | setup |
 | Context length | RoPE, long context | learned position embedding, so prompt + output ≤ `ctx_len` (`max_model_len`) | the engine must enforce it | why RoPE generalises and learned embeddings don't | setup |

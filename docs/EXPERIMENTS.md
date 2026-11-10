@@ -11,6 +11,51 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-10: GQA, n_kv_head 4 / 2 / 1 (F6 step 3)
+- **Question:** how much val loss do we pay for sharing k/v heads (4 query heads throughout)?
+- **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True, n_kv_head=…)`, otherwise `gpt-m-rms` (n_embd 128, n_head 4, n_layer 4, ctx_len 64, 5000 iters). Attention is now always `GroupedQueryAttention` (n_kv 4 = plain MHA via `repeat_interleave(1)`). Seed 1337. Branch `f6` after ce5ada2 (uncommitted). `--model gpt-m-rms`, `gpt-m-gqa2`, `gpt-m-gqa1`, run one after the other.
+- **Prediction:** small loss for 2, bigger for 1.
+- **Result:**
+
+  | Run | k/v heads | params | KV cache / token (fp32, 4 layers) | final train | final val | wall time (indicative) |
+  |---|---|---|---|---|---|---|
+  | gpt-m-rms | 4 | 815,553 | 4 KB | 1.3389 | **1.5681** | 84 s |
+  | gpt-m-gqa2 | 2 | 750,017 | 2 KB | 1.3401 | **1.5836** | 101 s |
+  | gpt-m-gqa1 | 1 | 717,249 | 1 KB | 1.3435 | **1.5726** | 93 s |
+
+- **Observations:** params drop by exactly the k/v weights (−65,536 and −98,304). **Train** loss rises in order (1.3389 → 1.3401 → 1.3435): less capacity, as expected. **Val** doesn't: n_kv 1 beat n_kv 2. The n_kv-4 config has now given val 1.5722, 1.5621 and 1.5681 across three runs (spread 0.010), so +0.016 (n_kv 2) and +0.005 (n_kv 1) are at or just past the noise. Prediction half right: the cost is small, but "bigger for 1" isn't visible at this size. GQA is **slower** to train here (+9 to +17 s): `repeat_interleave` adds copies and launches, and the k/v saving shows up only at decode (v9).
+- **Follow-up, fold instead of copy:** `repeat_interleave` replaced by folding each group's query heads into `g*T` rows, so k/v are never copied (test matches the copy version via SDPA). Prediction: about the same time. Result `gpt-m-gqa2`: val 1.5854, wall time **85 s** (vs 101 s with the copy, 84 s for n_kv 4). Prediction wrong: the copies cost ~16 s, so they weren't free even in training. gqa2 has now given 1.5836 and 1.5854, both above all three n_kv-4 runs (1.562–1.572), so its ~0.015 cost looks real; gqa1's single 1.5726 still needs a repeat.
+- **Decision:** at our size the quality cost of GQA is ≲ 0.015 val, within noise. Separating it would need several seeds per config. Default for v9: decide when the KV cache exists and the memory win can be measured (tokens/step, max batch). The `repeat_interleave` copy is logged in DESIGN "Gaps vs vLLM".
+
+## 2026-11-10: RMSNorm vs LayerNorm (F6 step 2)
+- **Question:** does RMSNorm in place of all 9 LayerNorms keep val loss and cut wall time?
+- **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True)`, otherwise `gpt-m-csa` (batched heads, n_embd 128, n_layer 4, ctx_len 64, 5000 iters). 815,553 params (−1,152: 9 biases × 128). Our hand-written `RMSNorm` (pow, mean, rsqrt, 2 muls). Seed 1337. Branch `f6` after 4586773 (uncommitted). `--model gpt-m-rms`, then `--model gpt-m-csa` rerun right after as the same-conditions baseline.
+- **Prediction:** same loss, slightly faster.
+- **Result:**
+
+  | Run | norm | final train | final val | wall time (indicative) |
+  |---|---|---|---|---|
+  | gpt-m-rms | RMSNorm | 1.3386 | **1.5722** | 89 s |
+  | gpt-m-csa (rerun) | LayerNorm | 1.3362 | **1.5719** | 81 s |
+
+- **Observations:** loss prediction right (Δ 0.0003). Speed prediction wrong: **~10% slower**. The `gpt-m-csa` rerun gave val 1.5719 vs 1.5776 this morning with the same seed, so MPS runs aren't bit-reproducible and val noise is ~0.006; any Δ below that means nothing. Likely cause of the slowdown: `nn.LayerNorm` is one fused kernel, while our RMSNorm is ~5 separate ops, and on MPS each launch costs more than the arithmetic RMSNorm saves. Not verified.
+- **Decision:** keep RMSNorm (Llama-standard, same loss). The "faster" claim only holds for a fused kernel; check `F.rms_norm` before claiming a speed win. Next: GQA (step 3).
+- **Follow-up, `F.rms_norm`:** forward swapped to `F.rms_norm(x, (C,), weight, eps)` (tests still match `nn.RMSNorm`). Prediction: back to ~81 s. Result: val 1.5621, wall time **88 s**: no faster than the hand-written 89 s. Val is 0.010 below the other runs, a bit beyond the ~0.006 noise seen so far, so treat it as noise until it repeats. So either `F.rms_norm` isn't one fused kernel on MPS (forward + backward) in torch 2.15, or the norm wasn't where the 8 s went. Not separated yet; a forward + backward microbenchmark of the two norms would settle it. Kept `F.rms_norm` (shorter, same maths).
+
+## 2026-11-10: batched heads vs looped heads (F6 step 1)
+- **Question:** does running all heads in one matmul (`CausalSelfAttention`) cut wall time without changing val loss?
+- **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT` (modern.py) = `gpt-m-nodrop` config (n_embd 128, n_layer 4, ctx_len 64, B 32, 5000 iters, AdamW 1e-3, dropout 0), 816,705 params (same as looped). Seed 1337. Branch `f6` after de0ffe2 (uncommitted). `--model gpt-m-csa` and `gpt-m-csa-h8`, run one after the other. Wall time = `/usr/bin/time` real, includes evals and the 500-char sample.
+- **Prediction:** not given (owner asked a GQA question instead).
+- **Result:**
+
+  | Run | heads | final train | final val | wall time (indicative) | looped wall time |
+  |---|---|---|---|---|---|
+  | gpt-m-csa | 4 | 1.3377 | **1.5776** | 82 s | 110 s |
+  | gpt-m-csa-h8 | 8 | 1.3380 | **1.5766** | 87 s | 158 s |
+
+- **Observations:** 4 heads run 1.34× faster, 8 heads 1.82× faster. The cost of more heads nearly vanishes (+5 s, vs +48 s looped): the extra cost was kernel launches, not maths. Val is 0.008 lower than the looped runs. The maths is identical (the test matches to 1e-6), so this is init noise: `ModernGPT` draws its random weights in a different order. Head count is still a null result for loss.
+- **Decision:** batched heads become the default for F6 and v9. `(B, nh, T, hs)` k/v is the KV-cache shape. Next: RMSNorm (step 2).
+
 ## 2026-11-02: head-count sweep, n_head 1 / 4 / 8 (F5 step 5), null result
 - **Question:** at a fixed width (n_embd 128), does splitting attention into more, smaller heads change val loss?
 - **Setup:** as run B (`gpt-m-nodrop`): 816,705 params in every run (n_head doesn't change the count), ctx 64, B=32, 5000 iters, lr 1e-3, no dropout, seed 1337, Apple M5, torch 2.15.0, MPS. `--model gpt-m-h1` / `gpt-m-nodrop` / `gpt-m-h8`. Branch `f5` after 6058af0 (config lines uncommitted at run time).

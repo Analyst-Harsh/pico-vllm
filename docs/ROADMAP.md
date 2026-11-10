@@ -14,7 +14,7 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 |---|---|---|
 | F4 tiny GPT 1/2 | 1 on the roadmap; plan for 2 | here |
 | F5 tiny GPT 2/2 | 1 on the roadmap; plan for 2 | here |
-| F6 modern architecture | 1, learn only | here (notes) |
+| F6 modern architecture | 1 learn + 3 small builds (batched heads, RMSNorm, GQA) | here |
 | v9 learn | 3 | here |
 | v9 build | 7: B1–B5 here; vllm-metal timebox + OpenAI-contract swap in Fryday | both |
 | v9 interview | 1 | Fryday |
@@ -59,15 +59,26 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 
 **Exit criteria:** a 500-character sample and the val loss in EXPERIMENTS; `make test` green; the checkpoint saved locally.
 
-## F6: modern LLM architecture (learn only)
+## F6: modern LLM architecture (learn, then three Llama-style changes)
 
 **Learn:**
-- ⭐ [Karpathy, *Deep Dive into LLMs like ChatGPT*](https://www.youtube.com/watch?v=7xTGNNLPyMI), in parts: pretraining → SFT → RLHF/DPO.
-- [Umar Jamil, *LLaMA explained*](https://www.youtube.com/watch?v=Mn_9W1nCFLo): KV cache, RoPE, RMSNorm, GQA.
+- ⭐ [Umar Jamil, *LLaMA explained*](https://www.youtube.com/watch?v=Mn_9W1nCFLo): KV cache, RoPE, RMSNorm, GQA, SwiGLU. Watch this first.
+- [Karpathy, *Deep Dive into LLMs like ChatGPT*](https://www.youtube.com/watch?v=7xTGNNLPyMI), in parts: pretraining → SFT → RLHF/DPO.
 
-**Optional ✍️ change:** swap LayerNorm for RMSNorm, or add `n_kv_head` (GQA). RoPE would also remove the context limit noted in DESIGN.
+**Build** (one change at a time; each retrains `gpt-m-nodrop`'s config and gets an EXPERIMENTS entry):
 
-**Exit criteria:** quiz; you can explain MHA → GQA and what it does to KV-cache size.
+| Step | ✍️ What you write | Test to aim at | Predict first |
+|---|---|---|---|
+| 1 | **Batched heads:** `CausalSelfAttention` replaces the `Head` loop. One `Linear(n_embd, 3 * n_embd)` for q, k, v, then `.view(B, T, n_head, head_size).transpose(1, 2)` so all heads run in one matmul. | same output as the looped `MultiHeadAttention` given the same weights; causal | wall time for 4 and 8 heads (looped: 110 s and 158 s); val loss unchanged? |
+| 2 | **RMSNorm** in place of LayerNorm (Block norms and `ln_f`) | output has root-mean-square ≈ 1 per token; matches `torch.nn.RMSNorm` | val loss and wall time vs LayerNorm |
+| 3 | **GQA:** `n_kv_head` (k and v heads) < `n_head` (query heads); each k/v head is shared by `n_head / n_kv_head` query heads | `n_kv_head == n_head` reproduces step 1 exactly; param count drops by the k/v weights saved | KV-cache bytes per token for n_kv_head = 4, 2, 1; how much val loss you lose |
+
+The best result becomes the checkpoint v9 serves. RoPE and SwiGLU stay in the backlog: RoPE is a v9 stretch goal (long context), SwiGLU teaches nothing new about serving.
+
+**Exit criteria:**
+- `make test` green; EXPERIMENTS entries for steps 1–3.
+- You can explain MHA → GQA and what it does to the KV-cache size (the formula is in v9 learn 1).
+- Quiz; LEARNING entry in Fryday.
 
 ---
 
@@ -90,12 +101,6 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 - [Lilian Weng, *Large Transformer Model Inference Optimization*](https://lilianweng.github.io/posts/2023-01-10-inference-optimization/)
 - TTFT, TPOT, throughput vs latency, Little's law, goodput. Depth: [Umar Jamil, *Flash Attention*](https://www.youtube.com/watch?v=zy8ChVd_oTM).
 - **Exit:** the metric definitions are filled in in DESIGN.md.
-
-## v9 B0: batched attention heads (prep for the KV cache)
-- **✍️ Write:** `CausalSelfAttention` in place of the `Head` loop: one `Linear(n_embd, 3 * n_embd)` for q, k, v, then `.view(B, T, n_head, head_size).transpose(1, 2)` so every head runs in one matmul. Retrain (or convert) the checkpoint.
-- **Test:** same output as the looped `MultiHeadAttention` when given the same weights.
-- **Predict:** wall time for 4 and 8 heads (looped: 110 s and 158 s, EXPERIMENTS 2026-11-02).
-- **Why here:** the KV cache in B1 and the pool in B2 are shaped `(…, n_head, …, head_size)`, so heads must already be a tensor dimension.
 
 ## v9 B1: KV cache
 - **✍️ Write:** `forward(idx, kv_cache, start_pos)` and cached generation.
@@ -144,11 +149,11 @@ F4–F5 built the simplest GPT that teaches the ideas. This is what a production
 
 | Change | What it replaces | Why | When |
 |---|---|---|---|
-| Batched heads | Python loop over `Head` | one matmul for all heads; needed for KV-cache shapes | **v9 B0** (above) |
-| Fused attention, `F.scaled_dot_product_attention(is_causal=True)` | hand-written mask + softmax | FlashAttention-style kernel, less memory | after B0 |
-| RMSNorm | LayerNorm | cheaper, used by Llama | F6 optional |
-| RoPE | learned position table | no hard `ctx_len` limit; relative positions | F6 optional |
-| GQA (`n_kv_head < n_head`) | one k, v per head | smaller KV cache | F6 optional; pays off in v9 |
+| Batched heads | Python loop over `Head` | one matmul for all heads; needed for KV-cache shapes | **F6 step 1** |
+| Fused attention, `F.scaled_dot_product_attention(is_causal=True)` | hand-written mask + softmax | FlashAttention-style kernel, less memory | after F6 step 1 |
+| RMSNorm | LayerNorm | cheaper, used by Llama | **F6 step 2** |
+| RoPE | learned position table | no hard `ctx_len` limit; relative positions | v9 stretch (long context) |
+| GQA (`n_kv_head < n_head`) | one k, v per head | smaller KV cache | **F6 step 3**; pays off in v9 |
 | SwiGLU (or GELU) | ReLU FFN | better loss per parameter (Llama, GPT-2) | any time |
 | Weight tying (`lm_head.weight = token_embedding.weight`) | separate lm_head | fewer params, often better | any time |
 | Scaled init for residual projections (std 0.02/√(2·n_layer)) | plain std 0.02 | keeps deep stacks stable | with more layers |
