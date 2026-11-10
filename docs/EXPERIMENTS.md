@@ -11,6 +11,22 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-10: GQA, n_kv_head 4 / 2 / 1 (F6 step 3)
+- **Question:** how much val loss do we pay for sharing k/v heads (4 query heads throughout)?
+- **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True, n_kv_head=…)`, otherwise `gpt-m-rms` (n_embd 128, n_head 4, n_layer 4, ctx_len 64, 5000 iters). Attention is now always `GroupedQueryAttention` (n_kv 4 = plain MHA via `repeat_interleave(1)`). Seed 1337. Branch `f6` after ce5ada2 (uncommitted). `--model gpt-m-rms`, `gpt-m-gqa2`, `gpt-m-gqa1`, run one after the other.
+- **Prediction:** small loss for 2, bigger for 1.
+- **Result:**
+
+  | Run | k/v heads | params | KV cache / token (fp32, 4 layers) | final train | final val | wall time (indicative) |
+  |---|---|---|---|---|---|---|
+  | gpt-m-rms | 4 | 815,553 | 4 KB | 1.3389 | **1.5681** | 84 s |
+  | gpt-m-gqa2 | 2 | 750,017 | 2 KB | 1.3401 | **1.5836** | 101 s |
+  | gpt-m-gqa1 | 1 | 717,249 | 1 KB | 1.3435 | **1.5726** | 93 s |
+
+- **Observations:** params drop by exactly the k/v weights (−65,536 and −98,304). **Train** loss rises in order (1.3389 → 1.3401 → 1.3435): less capacity, as expected. **Val** doesn't: n_kv 1 beat n_kv 2. The n_kv-4 config has now given val 1.5722, 1.5621 and 1.5681 across three runs (spread 0.010), so +0.016 (n_kv 2) and +0.005 (n_kv 1) are at or just past the noise. Prediction half right: the cost is small, but "bigger for 1" isn't visible at this size. GQA is **slower** to train here (+9 to +17 s): `repeat_interleave` adds copies and launches, and the k/v saving shows up only at decode (v9).
+- **Follow-up, fold instead of copy:** `repeat_interleave` replaced by folding each group's query heads into `g*T` rows, so k/v are never copied (test matches the copy version via SDPA). Prediction: about the same time. Result `gpt-m-gqa2`: val 1.5854, wall time **85 s** (vs 101 s with the copy, 84 s for n_kv 4). Prediction wrong: the copies cost ~16 s, so they weren't free even in training. gqa2 has now given 1.5836 and 1.5854, both above all three n_kv-4 runs (1.562–1.572), so its ~0.015 cost looks real; gqa1's single 1.5726 still needs a repeat.
+- **Decision:** at our size the quality cost of GQA is ≲ 0.015 val, within noise. Separating it would need several seeds per config. Default for v9: decide when the KV cache exists and the memory win can be measured (tokens/step, max batch). The `repeat_interleave` copy is logged in DESIGN "Gaps vs vLLM".
+
 ## 2026-11-10: RMSNorm vs LayerNorm (F6 step 2)
 - **Question:** does RMSNorm in place of all 9 LayerNorms keep val loss and cut wall time?
 - **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True)`, otherwise `gpt-m-csa` (batched heads, n_embd 128, n_layer 4, ctx_len 64, 5000 iters). 815,553 params (−1,152: 9 biases × 128). Our hand-written `RMSNorm` (pow, mean, rsqrt, 2 muls). Seed 1337. Branch `f6` after 4586773 (uncommitted). `--model gpt-m-rms`, then `--model gpt-m-csa` rerun right after as the same-conditions baseline.

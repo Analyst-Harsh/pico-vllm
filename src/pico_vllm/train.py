@@ -44,6 +44,9 @@ CONFIGS["gpt-m-csa"] = {**CONFIGS["gpt-m-nodrop"], "modern": True}
 CONFIGS["gpt-m-csa-h8"] = {**CONFIGS["gpt-m-h8"], "modern": True}
 # F6 step 2: RMSNorm in place of every LayerNorm
 CONFIGS["gpt-m-rms"] = {**CONFIGS["gpt-m-csa"], "rmsnorm": True}
+# F6 step 3: GQA, query heads stay 4, k/v heads 2 and 1 (4 = gpt-m-rms)
+CONFIGS["gpt-m-gqa2"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 2}
+CONFIGS["gpt-m-gqa1"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 1}
 
 
 def pick_device() -> str:
@@ -77,7 +80,13 @@ def build(
         return SingleHeadLanguageModel(vocab_size, n_embd=cfg["n_embd"], ctx_len=cfg["T"])
     sizes = {k: cfg[k] for k in ("n_embd", "n_head", "n_layer", "dropout")}
     if cfg.get("modern"):
-        return ModernGPT(vocab_size, ctx_len=cfg["T"], rmsnorm=cfg.get("rmsnorm", False), **sizes)
+        return ModernGPT(
+            vocab_size,
+            ctx_len=cfg["T"],
+            rmsnorm=cfg.get("rmsnorm", False),
+            n_kv_head=cfg.get("n_kv_head"),
+            **sizes,
+        )
     return GPT(vocab_size, ctx_len=cfg["T"], **sizes)
 
 

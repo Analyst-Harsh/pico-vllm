@@ -1,10 +1,10 @@
-"""F6 step 1 target: CausalSelfAttention (batched heads) in src/pico_vllm/modern.py."""
+"""F6 step 1 target: CausalSelfAttention (batched heads) in src/pico_vllm/model.py."""
 
 import pytest
 import torch
 
-from pico_vllm.model import GPT, MultiHeadAttention
-from pico_vllm.modern import CausalSelfAttention, ModernGPT
+from pico_vllm.model import GPT, CausalSelfAttention, MultiHeadAttention
+from pico_vllm.modern import ModernGPT
 
 B, T, C, NH, CTX = 2, 6, 16, 4, 8
 
