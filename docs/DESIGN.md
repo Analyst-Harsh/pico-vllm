@@ -7,13 +7,40 @@
 | Field | Value |
 |---|---|
 | Tokenizer | characters, vocab 65 |
-| `ctx_len` (context length) | TBD |
-| `n_embd` / `n_head` / `n_layer` | TBD |
-| Parameters | TBD (hand-calculated, then checked) |
-| Val loss | TBD → [EXPERIMENTS](EXPERIMENTS.md) |
+| `ctx_len` (context length) | 64 |
+| `n_embd` / `n_head` / `n_layer` | 128 / 4 / 4 (head_size 32); F6 adds `n_kv_head` |
+| Parameters | 816,705 (`gpt-m-nodrop`, matched by hand); 750,017 with GQA n_kv 2 |
+| Val loss | 1.585 (`gpt-m-nodrop`); 1.57–1.58 for the F6 variants → [EXPERIMENTS](EXPERIMENTS.md) |
 
 ## KV memory math (v9 learn 1)
-TBD: bytes per token = 2 × n_layer × n_kv_heads × head_dim × dtype bytes.
+```
+KV bytes per token = 2 × n_layer × n_kv_head × head_size × dtype_bytes
+                     │    │          │           │            └ 4 fp32, 2 bf16/fp16, 1 int8/fp8
+                     │    │          │           └ numbers per head vector
+                     │    │          └ k/v heads (= n_head for MHA, fewer for GQA, 1 for MQA)
+                     │    └ every layer keeps its own cache
+                     └ one k and one v
+KV bytes per sequence = KV bytes per token × tokens (prompt + generated so far)
+```
+
+**Our GPT** (4 layers, head_size 32, fp32, `ctx_len` 64):
+
+| Attention | n_kv_head | Per token | Per sequence at 64 tokens | Sequences in 100 MB |
+|---|---|---|---|---|
+| MHA (`gpt-m-nodrop`, `gpt-m-rms`) | 4 | 2·4·4·32·4 = **4 KB** | 256 KB | ~400 |
+| GQA (`gpt-m-gqa2`) | 2 | **2 KB** | 128 KB | ~800 |
+| MQA (`gpt-m-gqa1`) | 1 | **1 KB** | 64 KB | ~1,600 |
+
+The weights are 816,705 × 4 B ≈ 3.3 MB, so ~13 full sequences of MHA cache already outweigh the model. Serving memory is cache memory.
+
+**Real-model reference: Qwen3-4B** (Fryday's model; HF `config.json`: 36 layers, 32 query heads, 8 k/v heads, head_dim 128, bf16, max 40,960 positions):
+
+| | Per token | 4K-token sequence | Full 40,960-token sequence |
+|---|---|---|---|
+| As shipped (GQA, 8 k/v) | 2·36·8·128·2 = **144 KB** | 576 MB | 5.6 GB |
+| If it were MHA (32 k/v) | 576 KB | 2.3 GB | 22.5 GB |
+
+Decode reads the whole cache every step, so this size sets both how many sequences fit (B2, B3) and how fast each token is (memory-bound).
 
 ## Engine (v9)
 

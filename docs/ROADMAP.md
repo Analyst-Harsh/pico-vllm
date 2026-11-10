@@ -5,7 +5,7 @@ Every session, in order. A session is about 90 minutes; the protocol is in [CLAU
 **Where this sits in Fryday's plan:**
 
 ```
-F4 → F5 → F6  (here)  →  v7a lite (Fryday)  →  v9 (here + Fryday)  →  v8 Triton (Fryday) → …
+F4 → F5 → F6  (here)  →  v9 (here + Fryday)  →  v8 Triton (Fryday) → …     (v7a lite skipped, 2026-11-10)
 ```
 
 v9 comes before v8 on purpose: Triton is easier to judge once you've built an engine yourself.
@@ -82,7 +82,7 @@ The best result becomes the checkpoint v9 serves. RoPE and SwiGLU stay in the ba
 
 ---
 
-*Fryday runs v7a (lite) here; this repo is idle.*
+*v7a lite skipped by the owner (2026-11-10): v9 follows F6 directly.*
 
 ---
 
@@ -111,7 +111,7 @@ The best result becomes the checkpoint v9 serves. RoPE and SwiGLU stay in the ba
 ## v9 B2: paged KV
 - **✍️ Write:**
   - **`BlockAllocator`**: `allocate() -> int`, `free(block_id)`, `num_free`, and raise when out of blocks. This is the §5 interview piece.
-  - The KV pool per layer: `(num_blocks, page_size, n_head, head_size)`.
+  - The KV pool per layer: `(num_blocks, page_size, n_kv_head, head_size)` (GQA from F6 shrinks it).
   - A block table per sequence.
   - Attention that gathers K and V through the block table.
 - **Test:** paged output == contiguous output; the allocator never hands out a block twice.
