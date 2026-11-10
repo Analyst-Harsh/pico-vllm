@@ -57,3 +57,11 @@ def test_modern_gpt_matches_gpt_shape_and_params() -> None:
     assert not any(isinstance(m, MultiHeadAttention) for m in modern.modules())
     logits, _ = modern(torch.zeros((B, T), dtype=torch.long))
     assert logits.shape == (B, T, 65)
+
+
+def test_modern_gpt_rmsnorm_replaces_every_layernorm() -> None:
+    args = {"vocab_size": 65, "n_embd": C, "n_head": NH, "n_layer": 2, "ctx_len": CTX}
+    gpt, rms = GPT(**args), ModernGPT(**args, rmsnorm=True)
+    count = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
+    assert not any(isinstance(m, torch.nn.LayerNorm) for m in rms.modules())
+    assert count(gpt) - count(rms) == (2 * 2 + 1) * C  # 5 norms lose their bias

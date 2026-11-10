@@ -11,6 +11,21 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-10: RMSNorm vs LayerNorm (F6 step 2)
+- **Question:** does RMSNorm in place of all 9 LayerNorms keep val loss and cut wall time?
+- **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True)`, otherwise `gpt-m-csa` (batched heads, n_embd 128, n_layer 4, ctx_len 64, 5000 iters). 815,553 params (−1,152: 9 biases × 128). Our hand-written `RMSNorm` (pow, mean, rsqrt, 2 muls). Seed 1337. Branch `f6` after 4586773 (uncommitted). `--model gpt-m-rms`, then `--model gpt-m-csa` rerun right after as the same-conditions baseline.
+- **Prediction:** same loss, slightly faster.
+- **Result:**
+
+  | Run | norm | final train | final val | wall time (indicative) |
+  |---|---|---|---|---|
+  | gpt-m-rms | RMSNorm | 1.3386 | **1.5722** | 89 s |
+  | gpt-m-csa (rerun) | LayerNorm | 1.3362 | **1.5719** | 81 s |
+
+- **Observations:** loss prediction right (Δ 0.0003). Speed prediction wrong: **~10% slower**. The `gpt-m-csa` rerun gave val 1.5719 vs 1.5776 this morning with the same seed, so MPS runs aren't bit-reproducible and val noise is ~0.006; any Δ below that means nothing. Likely cause of the slowdown: `nn.LayerNorm` is one fused kernel, while our RMSNorm is ~5 separate ops, and on MPS each launch costs more than the arithmetic RMSNorm saves. Not verified.
+- **Decision:** keep RMSNorm (Llama-standard, same loss). The "faster" claim only holds for a fused kernel; check `F.rms_norm` before claiming a speed win. Next: GQA (step 3).
+- **Follow-up, `F.rms_norm`:** forward swapped to `F.rms_norm(x, (C,), weight, eps)` (tests still match `nn.RMSNorm`). Prediction: back to ~81 s. Result: val 1.5621, wall time **88 s**: no faster than the hand-written 89 s. Val is 0.010 below the other runs, a bit beyond the ~0.006 noise seen so far, so treat it as noise until it repeats. So either `F.rms_norm` isn't one fused kernel on MPS (forward + backward) in torch 2.15, or the norm wasn't where the 8 s went. Not separated yet; a forward + backward microbenchmark of the two norms would settle it. Kept `F.rms_norm` (shorter, same maths).
+
 ## 2026-11-10: batched heads vs looped heads (F6 step 1)
 - **Question:** does running all heads in one matmul (`CausalSelfAttention`) cut wall time without changing val loss?
 - **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT` (modern.py) = `gpt-m-nodrop` config (n_embd 128, n_layer 4, ctx_len 64, B 32, 5000 iters, AdamW 1e-3, dropout 0), 816,705 params (same as looped). Seed 1337. Branch `f6` after de0ffe2 (uncommitted). `--model gpt-m-csa` and `gpt-m-csa-h8`, run one after the other. Wall time = `/usr/bin/time` real, includes evals and the 500-char sample.

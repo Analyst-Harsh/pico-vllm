@@ -51,12 +51,35 @@ class CausalSelfAttention(nn.Module):
         return self.dropout(self.proj(out))
 
 
+class RMSNorm(nn.Module):
+    """LayerNorm without the mean: only rescale each token to root-mean-square 1. F6 step 2.
+
+    Llama uses this. One learned weight per channel, no bias.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))  # starts as "change nothing"
+
+    def forward(self, x: Tensor) -> Tensor:
+        """x (B, T, dim) -> (B, T, dim)."""
+        # What it computes (hand-written, ~6 kernels; EXPERIMENTS 2026-11-10):
+        #   inv_rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)  # (B, T, 1)
+        #   return x * inv_rms * self.weight
+        return F.rms_norm(x, (x.size(-1),), self.weight, self.eps)  # same maths, one call
+
+
 class ModernBlock(model.Block):
     """F5 Block with the looped heads swapped for CausalSelfAttention. Steps 2-3 edit here."""
 
-    def __init__(self, n_embd: int, n_head: int, ctx_len: int, dropout: float = 0.0) -> None:
+    def __init__(
+        self, n_embd: int, n_head: int, ctx_len: int, dropout: float = 0.0, rmsnorm: bool = False
+    ) -> None:
         super().__init__(n_embd, n_head, ctx_len, dropout)
         self.sa = CausalSelfAttention(n_embd, n_head, ctx_len, dropout)
+        if rmsnorm:  # step 2; off by default so step-1 checkpoints still load
+            self.ln1, self.ln2 = RMSNorm(n_embd), RMSNorm(n_embd)
 
 
 class ModernGPT(model.GPT):
@@ -70,9 +93,12 @@ class ModernGPT(model.GPT):
         n_layer: int,
         ctx_len: int,
         dropout: float = 0.0,
+        rmsnorm: bool = False,
     ) -> None:
         super().__init__(vocab_size, n_embd, n_head, n_layer, ctx_len, dropout)
         self.blocks = nn.Sequential(
-            *(ModernBlock(n_embd, n_head, ctx_len, dropout) for _ in range(n_layer))
+            *(ModernBlock(n_embd, n_head, ctx_len, dropout, rmsnorm) for _ in range(n_layer))
         )
+        if rmsnorm:
+            self.ln_f = RMSNorm(n_embd)
         self.apply(self._init_weights)  # the new blocks need the GPT-2 init too

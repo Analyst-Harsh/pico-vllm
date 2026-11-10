@@ -42,6 +42,8 @@ CONFIGS["gpt-m-h8"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 8}
 # F6 step 1: batched heads (modern.py), same configs as the looped runs above
 CONFIGS["gpt-m-csa"] = {**CONFIGS["gpt-m-nodrop"], "modern": True}
 CONFIGS["gpt-m-csa-h8"] = {**CONFIGS["gpt-m-h8"], "modern": True}
+# F6 step 2: RMSNorm in place of every LayerNorm
+CONFIGS["gpt-m-rms"] = {**CONFIGS["gpt-m-csa"], "rmsnorm": True}
 
 
 def pick_device() -> str:
@@ -73,14 +75,10 @@ def build(
         return BigramLanguageModel(vocab_size)
     if name == "head":
         return SingleHeadLanguageModel(vocab_size, n_embd=cfg["n_embd"], ctx_len=cfg["T"])
-    return (ModernGPT if cfg.get("modern") else GPT)(
-        vocab_size,
-        n_embd=cfg["n_embd"],
-        n_head=cfg["n_head"],
-        n_layer=cfg["n_layer"],
-        ctx_len=cfg["T"],
-        dropout=cfg["dropout"],
-    )
+    sizes = {k: cfg[k] for k in ("n_embd", "n_head", "n_layer", "dropout")}
+    if cfg.get("modern"):
+        return ModernGPT(vocab_size, ctx_len=cfg["T"], rmsnorm=cfg.get("rmsnorm", False), **sizes)
+    return GPT(vocab_size, ctx_len=cfg["T"], **sizes)
 
 
 def main() -> None:
