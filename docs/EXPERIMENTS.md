@@ -11,6 +11,20 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-10: batched heads vs looped heads (F6 step 1)
+- **Question:** does running all heads in one matmul (`CausalSelfAttention`) cut wall time without changing val loss?
+- **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT` (modern.py) = `gpt-m-nodrop` config (n_embd 128, n_layer 4, ctx_len 64, B 32, 5000 iters, AdamW 1e-3, dropout 0), 816,705 params (same as looped). Seed 1337. Branch `f6` after de0ffe2 (uncommitted). `--model gpt-m-csa` and `gpt-m-csa-h8`, run one after the other. Wall time = `/usr/bin/time` real, includes evals and the 500-char sample.
+- **Prediction:** not given (owner asked a GQA question instead).
+- **Result:**
+
+  | Run | heads | final train | final val | wall time (indicative) | looped wall time |
+  |---|---|---|---|---|---|
+  | gpt-m-csa | 4 | 1.3377 | **1.5776** | 82 s | 110 s |
+  | gpt-m-csa-h8 | 8 | 1.3380 | **1.5766** | 87 s | 158 s |
+
+- **Observations:** 4 heads run 1.34× faster, 8 heads 1.82× faster. The cost of more heads nearly vanishes (+5 s, vs +48 s looped): the extra cost was kernel launches, not maths. Val is 0.008 lower than the looped runs. The maths is identical (the test matches to 1e-6), so this is init noise: `ModernGPT` draws its random weights in a different order. Head count is still a null result for loss.
+- **Decision:** batched heads become the default for F6 and v9. `(B, nh, T, hs)` k/v is the KV-cache shape. Next: RMSNorm (step 2).
+
 ## 2026-11-02: head-count sweep, n_head 1 / 4 / 8 (F5 step 5), null result
 - **Question:** at a fixed width (n_embd 128), does splitting attention into more, smaller heads change val loss?
 - **Setup:** as run B (`gpt-m-nodrop`): 816,705 params in every run (n_head doesn't change the count), ctx 64, B=32, 5000 iters, lr 1e-3, no dropout, seed 1337, Apple M5, torch 2.15.0, MPS. `--model gpt-m-h1` / `gpt-m-nodrop` / `gpt-m-h8`. Branch `f5` after 6058af0 (config lines uncommitted at run time).

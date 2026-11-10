@@ -11,6 +11,7 @@ from torch import Tensor, nn
 
 from pico_vllm.data import CharTokenizer, get_batch, train_val_split
 from pico_vllm.model import GPT, BigramLanguageModel, SingleHeadLanguageModel
+from pico_vllm.modern import ModernGPT
 
 SEED = 1337
 EVAL_ITERS = 200
@@ -38,6 +39,9 @@ CONFIGS["gpt-m-nodrop"] = {**CONFIGS["gpt-m"], "dropout": 0.0}  # B without drop
 # F5 step 5: head-count sweep (same params; only how attention is split changes)
 CONFIGS["gpt-m-h1"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 1}
 CONFIGS["gpt-m-h8"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 8}
+# F6 step 1: batched heads (modern.py), same configs as the looped runs above
+CONFIGS["gpt-m-csa"] = {**CONFIGS["gpt-m-nodrop"], "modern": True}
+CONFIGS["gpt-m-csa-h8"] = {**CONFIGS["gpt-m-h8"], "modern": True}
 
 
 def pick_device() -> str:
@@ -69,7 +73,7 @@ def build(
         return BigramLanguageModel(vocab_size)
     if name == "head":
         return SingleHeadLanguageModel(vocab_size, n_embd=cfg["n_embd"], ctx_len=cfg["T"])
-    return GPT(
+    return (ModernGPT if cfg.get("modern") else GPT)(
         vocab_size,
         n_embd=cfg["n_embd"],
         n_head=cfg["n_head"],
