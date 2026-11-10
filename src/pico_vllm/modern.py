@@ -8,7 +8,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from pico_vllm import model
-from pico_vllm.kv_cache import KVCache
+from pico_vllm.kv_cache import KVCache, PagedKVCache
 from pico_vllm.sample import sample_next
 
 
@@ -39,7 +39,11 @@ class GroupedQueryAttention(nn.Module):
         self.register_buffer("tril", torch.tril(torch.ones(ctx_len, ctx_len)))
 
     def forward(
-        self, x: Tensor, cache: KVCache | None = None, layer: int = 0, start_pos: int = 0
+        self,
+        x: Tensor,
+        cache: KVCache | PagedKVCache | None = None,
+        layer: int = 0,
+        start_pos: int = 0,
     ) -> Tensor:
         """x (B, T, n_embd) -> (B, T, n_embd). x holds positions [start_pos, start_pos + T)."""
         B, T, C = x.shape
@@ -108,7 +112,11 @@ class ModernBlock(model.Block):
             self.ln1, self.ln2 = RMSNorm(n_embd), RMSNorm(n_embd)
 
     def forward(
-        self, x: Tensor, cache: KVCache | None = None, layer: int = 0, start_pos: int = 0
+        self,
+        x: Tensor,
+        cache: KVCache | PagedKVCache | None = None,
+        layer: int = 0,
+        start_pos: int = 0,
     ) -> Tensor:
         """Same as Block, plus the cache handed down to attention."""
         x = x + self.sa(self.ln1(x), cache, layer, start_pos)
@@ -144,7 +152,7 @@ class ModernGPT(model.GPT):
         self,
         idx: Tensor,
         targets: Tensor | None = None,
-        cache: KVCache | None = None,
+        cache: KVCache | PagedKVCache | None = None,
         start_pos: int = 0,
     ) -> tuple[Tensor, Tensor | None]:
         """idx (B, T) holds positions [start_pos, start_pos + T). No cache: start_pos is 0."""
@@ -176,15 +184,17 @@ class ModernGPT(model.GPT):
         temperature: float = 1.0,
         top_k: int | None = None,
         generator: torch.Generator | None = None,
+        cache: KVCache | PagedKVCache | None = None,
     ) -> Tensor:
         """Prefill the prompt once, then feed one token per step. v9 B1.
 
         Learned positions: prompt + new tokens must fit in ctx_len (no cropping like generate).
+        cache: an empty cache to fill (B2 passes a PagedKVCache); default a contiguous one.
         """
         B, T = idx.shape
         if T + max_new_tokens > self.ctx_len:
             raise ValueError(f"prompt {T} + {max_new_tokens} new > ctx_len={self.ctx_len}")
-        cache = self.new_cache(B, idx.device)
+        cache = cache or self.new_cache(B, idx.device)
         logits, _ = self(idx, cache=cache, start_pos=0)  # prefill: whole prompt, fills the cache
         for i in range(max_new_tokens):
             idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)  # (B, 1)
