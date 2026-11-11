@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from pico_vllm.sample import sample_next
+from pico_vllm.sampler import sample_next
 
 
 class Head(nn.Module):

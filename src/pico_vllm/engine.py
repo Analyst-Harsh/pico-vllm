@@ -23,7 +23,7 @@ import torch
 
 from pico_vllm.kv_cache import OutOfBlocksError, PagedKVCache
 from pico_vllm.modern import ModernGPT
-from pico_vllm.sample import sample_next
+from pico_vllm.sampler import sample_next
 
 
 class Status(Enum):

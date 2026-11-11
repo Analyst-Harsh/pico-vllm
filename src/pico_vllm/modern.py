@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 from pico_vllm import model
 from pico_vllm.kv_cache import KVCache, PagedKVCache
-from pico_vllm.sample import sample_next
+from pico_vllm.sampler import sample_next
 
 
 def positions(start_pos: int | Tensor, T: int, device: torch.device) -> Tensor:

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.sample import next_token_probs, sample_next
+from pico_vllm.sampler import next_token_probs, sample_next
 
 LOGITS = torch.tensor(
     [
