@@ -183,6 +183,17 @@ uv run python -m pico_vllm.demo race                             # the two side 
 uv run python -m pico_vllm.demo serve                            # 8 requests through the engine, live
 ```
 
+**Skip the training:** both trained models are in the [v1.0.0 release](https://github.com/Analyst-Harsh/pico-vllm/releases/tag/v1.0.0). Download them into `checkpoints/` and every command above works straight away:
+
+```sh
+gh release download v1.0.0 -p '*.pt' -D checkpoints
+# or, without the GitHub CLI:
+mkdir -p checkpoints
+for m in gpt-l-gqa gpt-m-gqa2; do
+  curl -L -o checkpoints/$m.pt https://github.com/Analyst-Harsh/pico-vllm/releases/download/v1.0.0/$m.pt
+done
+```
+
 <details>
 <summary>Make targets and git hooks</summary>
 
@@ -252,7 +263,5 @@ docs/                  DESIGN, EXPERIMENTS, ROADMAP, assets/
 Credits:
 - [Andrej Karpathy, *Let's build GPT*](https://www.youtube.com/watch?v=kCc8FmEb1nY) and [ng-video-lecture](https://github.com/karpathy/ng-video-lecture)
 - [Kwon et al., *Efficient Memory Management for LLM Serving with PagedAttention*](https://arxiv.org/abs/2309.06180)
-- [Yu et al., *Orca*](https://www.usenix.org/conference/osdi22/presentation/yu) (iteration-level scheduling)
-- [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)
 
 <div align="center"><sub>MIT © Harshit Goyal</sub></div>
