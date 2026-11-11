@@ -1,4 +1,4 @@
-.PHONY: sync data test learner lint
+.PHONY: sync data test lint
 
 DATA := data/input.txt
 URL  := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
@@ -15,9 +15,6 @@ $(DATA):
 
 test:     ## tests that must stay green (CI runs these)
 	uv run pytest -q
-
-learner:  ## your red tests for the piece you're writing now
-	uv run pytest -q -m learner || test $$? -eq 5  # 5 = no learner tests open right now
 
 lint:
 	uv run ruff format --check .
