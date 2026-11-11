@@ -104,7 +104,13 @@ def main() -> None:
     ap.add_argument("--max-num-seqs", type=int, default=8)
     args = ap.parse_args()
 
-    ck = torch.load(Path("checkpoints") / f"{args.checkpoint}.pt")
+    path = Path("checkpoints") / f"{args.checkpoint}.pt"
+    if not path.exists():
+        raise SystemExit(
+            f"no checkpoint at {path}; train it first:\n"
+            f"  uv run python -m pico_vllm.train --model {args.checkpoint}"
+        )
+    ck = torch.load(path, map_location="cpu")
     model = build(args.checkpoint, len(ck["chars"]), ck["config"])
     model.load_state_dict(ck["model"])
     if not isinstance(model, ModernGPT):
