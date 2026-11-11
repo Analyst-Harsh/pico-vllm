@@ -1,13 +1,76 @@
-"""F5 step 1d: GPT in src/pico_vllm/model.py."""
+"""The GPT-2-style transformer: FeedForward, Block, GPT."""
 
 import math
 
 import pytest
 import torch
 
-from pico_vllm.model.gpt import GPT
+from pico_vllm.model.gpt import GPT, Block, FeedForward
 
-V, C, NH, NL, CTX, B = 11, 16, 4, 2, 8, 2
+B, T, C, NH, CTX = 2, 6, 16, 4, 8
+V, NL = 11, 2
+
+
+# ---- FeedForward: a per-token MLP -----------------------------------------------------------
+
+
+@pytest.fixture
+def ffn() -> FeedForward:
+    torch.manual_seed(1337)
+    return FeedForward(C).eval()
+
+
+def test_ffn_output_shape(ffn: FeedForward) -> None:
+    assert ffn(torch.randn(B, T, C)).shape == (B, T, C)
+
+
+def test_hidden_layer_is_4x_wider(ffn: FeedForward) -> None:
+    widths = [m.out_features for m in ffn.modules() if isinstance(m, torch.nn.Linear)]
+    assert widths == [4 * C, C]
+
+
+def test_each_token_is_processed_alone(ffn: FeedForward) -> None:
+    x = torch.randn(B, T, C)
+    x2 = x.clone()
+    x2[:, 2] = torch.randn(B, C)  # change token 2 only
+    out, out2 = ffn(x), ffn(x2)
+    others = [i for i in range(T) if i != 2]
+    assert torch.allclose(out[:, others], out2[:, others])  # past AND future untouched
+    assert not torch.allclose(out[:, 2], out2[:, 2])
+
+
+# ---- Block: attention then feed-forward, pre-norm, residuals --------------------------------
+
+
+@pytest.fixture
+def block() -> Block:
+    torch.manual_seed(1337)
+    return Block(n_embd=C, n_head=NH, ctx_len=CTX).eval()
+
+
+def test_block_output_shape(block: Block) -> None:
+    assert block(torch.randn(B, T, C)).shape == (B, T, C)
+
+
+def test_block_causal(block: Block) -> None:
+    x = torch.randn(B, T, C)
+    x2 = x.clone()
+    x2[:, 3:] = torch.randn(B, T - 3, C)
+    assert torch.allclose(block(x)[:, :3], block(x2)[:, :3])
+
+
+def test_residual_block_with_silent_sublayers_is_identity(block: Block) -> None:
+    # zero the last layer of each sub-layer -> both add 0 -> the residual path returns x
+    last_layers = [block.sa.proj, block.ffwd.net[2]]
+    with torch.no_grad():
+        for layer in last_layers:
+            layer.weight.zero_()
+            layer.bias.zero_()
+    x = torch.randn(B, T, C)
+    assert torch.allclose(block(x), x)
+
+
+# ---- GPT: embeddings -> Blocks -> lm_head ---------------------------------------------------
 
 
 @pytest.fixture
@@ -30,7 +93,7 @@ def test_step0_loss_is_near_uniform(gpt: GPT) -> None:
     assert abs(loss.item() - math.log(V)) < 0.1
 
 
-def test_causal(gpt: GPT) -> None:
+def test_gpt_causal(gpt: GPT) -> None:
     idx = torch.randint(V, (B, CTX))
     idx2 = idx.clone()
     idx2[:, 5:] = (idx2[:, 5:] + 1) % V

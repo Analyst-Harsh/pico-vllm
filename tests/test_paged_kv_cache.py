@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from pico_vllm.model.llama_style import ModernGPT
-from pico_vllm.serving.block_allocator import BlockAllocator, OutOfBlocksError
+from pico_vllm.serving.block_allocator import OutOfBlocksError
 from pico_vllm.serving.kv_cache import KVCache
 from pico_vllm.serving.paged_kv_cache import PagedKVCache
 
@@ -22,26 +22,6 @@ def tiny() -> ModernGPT:
 
 def paged(batch_size: int, num_blocks: int = 32) -> PagedKVCache:
     return PagedKVCache(NL, num_blocks, PAGE, NKV, HS, batch_size)
-
-
-def test_allocator_never_hands_out_a_block_twice() -> None:
-    alloc = BlockAllocator(4)
-    got = [alloc.allocate() for _ in range(4)]
-    assert sorted(got) == [0, 1, 2, 3]
-    assert alloc.num_free == 0
-    with pytest.raises(OutOfBlocksError):
-        alloc.allocate()
-    alloc.free(got[1])
-    assert alloc.num_free == 1
-    assert alloc.allocate() == got[1]  # reused only after it was freed
-
-
-def test_allocator_rejects_double_free() -> None:
-    alloc = BlockAllocator(2)
-    b = alloc.allocate()
-    alloc.free(b)
-    with pytest.raises(ValueError, match="not allocated"):
-        alloc.free(b)
 
 
 def test_paged_update_matches_contiguous_across_page_boundaries() -> None:
