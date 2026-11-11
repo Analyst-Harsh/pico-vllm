@@ -3,9 +3,9 @@
 import pytest
 import torch
 
-from pico_vllm.engine import Engine
 from pico_vllm.modern import ModernGPT
 from pico_vllm.serving.block_allocator import BlockAllocator
+from pico_vllm.serving.engine import Engine
 
 V, C, NH, NKV, NL, CTX, PAGE = 65, 16, 4, 2, 2, 32, 4
 SYSTEM = [3, 1, 4, 1, 5, 9, 2, 6]  # a shared 2-page "system prompt"

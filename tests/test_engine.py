@@ -5,8 +5,9 @@ import random
 import pytest
 import torch
 
-from pico_vllm.engine import Engine, Status
 from pico_vllm.modern import ModernGPT
+from pico_vllm.serving.engine import Engine
+from pico_vllm.serving.sequence import Status
 
 V, C, NH, NKV, NL, CTX, PAGE = 65, 16, 4, 2, 2, 32, 4
 

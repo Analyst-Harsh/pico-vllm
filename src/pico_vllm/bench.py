@@ -12,8 +12,8 @@ from pathlib import Path
 
 import torch
 
-from pico_vllm.engine import Engine
 from pico_vllm.modern import ModernGPT
+from pico_vllm.serving.engine import Engine
 from pico_vllm.train import build
 
 
