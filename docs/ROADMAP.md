@@ -136,6 +136,7 @@ The best result becomes the checkpoint v9 serves. RoPE and SwiGLU stay in the ba
 ## v9 B5: read the real thing
 - [vLLM v1 scheduler](https://github.com/vllm-project/vllm/tree/main/vllm/v1/core/sched) and [kv_cache_manager.py](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/kv_cache_manager.py), next to [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm).
 - **Exit:** a mapping table in DESIGN.md (their class or function → ours).
+- **Skipped (2026-11-11, owner's call):** B1–B4 and the walkthroughs covered the ideas; reading vLLM's code can happen later if a production issue needs it. Two points stay unverified: how vLLM stores two blocks with the same hash, and whether it frees a sequence's blocks in reverse order.
 
 **Stays in Fryday:** the vllm-metal vs `mlx_lm.server` comparison (1-session timebox), the OpenAI-contract swap, and the v9 interview session.
 

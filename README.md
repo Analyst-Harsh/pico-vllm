@@ -12,7 +12,7 @@ KV cache → paged KV → continuous batching → prefix caching, in plain PyTor
 
 </div>
 
-> 🚧 **Learning in public. This repo starts empty on purpose.** I write every line of the model and the engine myself, session by session, following [the roadmap](docs/ROADMAP.md). The status table below shows how far I've got.
+> 🚧 **Learning in public.** I build the model and the engine session by session with Claude Code as tutor and pair programmer, following [the roadmap](docs/ROADMAP.md). The status table below shows how far I've got.
 
 ## Why
 
@@ -75,9 +75,10 @@ make test
 
 ## How it's built
 
-- **I write the model and engine code myself.** Claude Code is my tutor: it explains each concept, sets a failing test for me to aim at, gives hints, and reviews my code.
+- **Claude Code writes most of the code, at my request, then walks me through it step by step** until I can explain it back: self-attention, the GPT, the KV cache, the block allocator, the scheduler and prefix caching. I predict results before each run and ask the "why" questions.
+- **Every piece is checked against a simple reference:** batched vs looped attention, cached vs recomputed generation, paged vs contiguous cache, engine vs one-request-at-a-time greedy.
+- **Every measurement, including wrong predictions and negative results,** is in [EXPERIMENTS](docs/EXPERIMENTS.md).
 - **The repo tooling was set up with Claude Code:** uv, ruff, pytest, lefthook and CI.
-- **The pieces I'd be asked about in an interview** are written without help: self-attention, the sampler, the block allocator and the scheduler step.
 
 ## What this isn't
 
