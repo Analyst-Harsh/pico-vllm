@@ -11,6 +11,67 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-11: prefix caching on a shared system prompt (v9 B4)
+- **Question:** when every request starts with the same system prompt, how much prefill and memory does prefix caching save, and does it change throughput?
+- **Setup:** Apple M5, torch 2.15.0, CPU. `checkpoints/gpt-m-gqa2.pt`, greedy, continuous batching, `max_num_seqs` 8, `page_size` 16. `uv run python -m pico_vllm.bench` (B4 table): 64 requests at 0.5/step, each = one shared 32-token system prompt (2 pages) + a 4–12 token user part, 4–16 new tokens, seed 1. Pool 32 pages (plenty) or 10 (tight), prefix caching off vs on. Branch `v9` after 5a8ced2 (uncommitted).
+- **Prediction:** not given.
+- **Result:** outputs equal one-at-a-time greedy with caching on, including under eviction and preemption (tests).
+
+  | pages | prefix cache | steps | tokens/step | TTFT p50 / p99 | TPOT p99 | preemptions | peak pages | prefill tokens | hit rate | wall (indicative) |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | 32 | off | 114 | 5.67 | 1 / 4 | 1.00 | 0 | 27 | 2,541 | 0% | 0.17 s |
+  | 32 | **on** | 114 | 5.67 | 1 / 4 | 1.00 | 0 | **13** | **525** | **79%** | 0.17 s |
+  | 10 | off | 205 | 3.15 | 55 / 94 | 1.40 | 13 | 10 | 3,115 | 0% | 0.22 s |
+  | 10 | **on** | **118** | **5.47** | **1 / 9** | 1.67 | 17 | 10 | **670** | **79%** | 0.18 s |
+
+- **Observations:** 79% of prompt tokens come from the cache (32 shared of ~40 per prompt, minus the first request), so prefill work drops 79% and, because the 2 system pages are stored once instead of per sequence, peak memory halves (27 → 13 pages). With plenty of memory, steps and TTFT don't move: our step count charges a prefill the same one step whatever its length, so the prefill saving is invisible in steps (on a real GPU it would cut TTFT directly). With tight memory the memory saving is what matters: more sequences fit, so steps drop 205 → 118 and median TTFT 55 → 1. Preemptions rise slightly (13 → 17) because more sequences run at once and compete for growth pages.
+- **Decision:** turn prefix caching on whenever prompts share a start (Fryday: system prompt, tools, a user's history). Its win shows up as prefill tokens saved and memory, so measure both; TTFT in steps under-reports it. Metric gap noted: steps don't weigh prefill length. Next: B5, read vLLM's scheduler and KV-cache manager.
+
+## 2026-11-11: static vs continuous batching (v9 B3)
+- **Question:** on the same mixed workload, how much do continuous batching and paging beat static batching, and what does a memory-tight pool cost?
+- **Setup:** Apple M5, torch 2.15.0, CPU. `checkpoints/gpt-m-gqa2.pt`, greedy. `uv run python -m pico_vllm.bench` (defaults): 64 requests, Poisson arrivals at 0.5/step, prompts 4–16 chars, outputs 70% short (4–16) and 30% long (32 to ctx_len − prompt), seed 0. `max_num_seqs` 8, `page_size` 16. Pool: 32 pages (8 sequences × 64 positions, full) or 10 (tight). Static reserves each request's full length; continuous takes pages on demand and preempts (recompute) the newest sequence when out. Branch `v9` after acdf988 (uncommitted).
+- **Prediction:** not given.
+- **Result:** outputs equal one-at-a-time greedy for both policies, with and without preemption (tests).
+
+  | Policy | pages | steps | tokens/step | utilisation | padding waste | TTFT p50 / p99 (steps) | TPOT p50 / p99 (steps) | preemptions | peak pages | wall (indicative) |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | static | 32 | 421 | 3.29 | 41% | 56% | 139 / 247 | 1.00 / 1.00 | 0 | 23 | 0.36 s |
+  | **continuous** | 32 | **197** | **7.08** | **89%** | 0% | **8 / 22** | 1.00 / 1.00 | 0 | 23 | 0.27 s |
+  | continuous, tight | 10 | 312 | 4.45 | 56% | 0% | 58 / 118 | 1.00 / 6.40 | 55 | 10 | 0.34 s |
+
+- **Observations:** continuous finishes the same work in **2.1× fewer steps** (2.2× tokens/step), and median TTFT drops from 139 to 8 steps: in static, a request arriving mid-batch waits for the batch's longest member, and 56% of batch slots are held by finished sequences. TPOT is 1.0 for both when memory is plentiful: once running, every sequence gets a token every step. With a third of the pages, continuous still beats static on every number (312 steps, TTFT p50 58) but pays in preemptions (55): p99 TPOT rises to 6.4 because preempted sequences sit out and are recomputed. Wall-clock barely moves (0.27–0.36 s): on this tiny model a step's cost is mostly fixed overhead, so steps saved ≠ time saved here.
+- **Decision:** continuous batching is the engine default. Memory sets the ceiling: below what the workload's concurrency needs, preemption keeps outputs right but shows up first in p99 TPOT, so watch preemptions and p99, not averages. Next: B4 prefix caching.
+
+## 2026-11-11: paged KV memory held vs contiguous (v9 B2)
+- **Question:** how many KV slots does the paged cache hold compared with B1's ctx_len-per-sequence box?
+- **Setup:** `checkpoints/gpt-m-gqa2.pt`, CPU, batch 3, 7-token prompt, `PagedKVCache(page_size=16, num_blocks=32)`. Contiguous holds 3 × 64 = 192 slots whatever the length. Commit acdf988.
+- **Prediction:** not given.
+- **Result:** paged output equals contiguous (tests + checkpoint check).
+
+  | new tokens | positions cached / seq | pages / seq | slots held (paged) | vs contiguous |
+  |---|---|---|---|---|
+  | 10 | 16 | 1 | 48 | 25% |
+  | 20 | 26 | 2 | 96 | 50% |
+  | 50 | 56 | 4 | 192 | 100% |
+
+  Sampled run (temperature 0.8, top-k 20, seed 1337, 50 new): block tables `[31, 28, 25, 22]`, `[30, 27, 24, 21]`, `[29, 26, 23, 20]`; pool 20/32 free during, 32/32 after `free()`.
+- **Observations:** the saving is exactly the unused tail: short outputs hold a quarter of the memory, and outputs near ctx_len save nothing (4 × 16 = 64 = ctx_len). Pages interleave across sequences because all three grow in lockstep, so each sequence's pages are scattered: the block table is doing real work. Waste per sequence is under one page.
+- **Decision:** paging pays off when lengths vary and most stop well before ctx_len, which is B3's mixed workload. Measure KV block usage there.
+
+## 2026-11-11: KV cache vs recompute (v9 B1)
+- **Question:** how much faster is `generate_cached` than `generate`, and does per-token cost grow with position?
+- **Setup:** Apple M5, torch 2.15.0. `checkpoints/gpt-m-gqa2.pt` (ModernGPT, RMSNorm, 4 query / 2 k/v heads, ctx_len 64), batch 1, prompt = 1 token, greedy. Median of 5 runs after a warm-up, MPS (with `torch.mps.synchronize`) and CPU. Branch `v9` after 914d11c (uncommitted). Script in the session scratchpad (`time_kv.py`).
+- **Prediction:** not given.
+- **Result:** outputs identical (also checked for `gpt-m-rms`). Token positions pushed through the model for 63 new tokens: **2,016 without the cache, 63 with it** (1 + 63 counting the prompt).
+
+  | Device | new tokens | generate | cached | speed-up |
+  |---|---|---|---|---|
+  | MPS | 15 / 31 / 63 | 2.53 / 2.28 / 2.39 ms/tok | 2.00 / 2.00 / 2.22 ms/tok | 1.3× / 1.1× / 1.1× |
+  | CPU | 15 / 31 / 63 | 0.38 / 0.40 / 0.46 ms/tok | 0.33 / 0.33 / 0.33 ms/tok | 1.2× / 1.2× / 1.4× |
+
+- **Observations:** 32× less work, but only 1.1–1.4× faster. The shape is right on CPU: uncached ms/token grows with position (0.38 → 0.46), cached stays flat (0.33). The size isn't: for a 750K-param model, pushing 64 positions through instead of 1 is almost free, and each step's cost is the fixed ~50 kernel launches plus Python, which the cache doesn't remove. MPS is ~6× slower than CPU here (launch overhead again), and its per-step time is flat at ~2 ms whatever the work.
+- **Decision:** B1 is correct and does what it should (work per token constant). Its speed win needs a model where compute or memory per step dominates. In the engine, measure tokens/step and work, not wall-clock. The cache's real role in v9 is enabling batching: B2/B3 build on it.
+
 ## 2026-11-10: GQA, n_kv_head 4 / 2 / 1 (F6 step 3)
 - **Question:** how much val loss do we pay for sharing k/v heads (4 query heads throughout)?
 - **Setup:** Apple M5, torch 2.15.0, MPS. `ModernGPT(rmsnorm=True, n_kv_head=…)`, otherwise `gpt-m-rms` (n_embd 128, n_head 4, n_layer 4, ctx_len 64, 5000 iters). Attention is now always `GroupedQueryAttention` (n_kv 4 = plain MHA via `repeat_interleave(1)`). Seed 1337. Branch `f6` after ce5ada2 (uncommitted). `--model gpt-m-rms`, `gpt-m-gqa2`, `gpt-m-gqa1`, run one after the other.

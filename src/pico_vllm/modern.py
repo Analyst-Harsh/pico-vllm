@@ -8,6 +8,14 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from pico_vllm import model
+from pico_vllm.kv_cache import KVCache, PagedKVCache
+from pico_vllm.sample import sample_next
+
+
+def positions(start_pos: int | Tensor, T: int, device: torch.device) -> Tensor:
+    """Positions of a T-token chunk: (1, T) for one int start, (B, T) for a start per row."""
+    starts = start_pos.view(-1, 1) if isinstance(start_pos, Tensor) else torch.tensor([[start_pos]])
+    return starts.to(device) + torch.arange(T, device=device)
 
 
 class GroupedQueryAttention(nn.Module):
@@ -36,8 +44,17 @@ class GroupedQueryAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.register_buffer("tril", torch.tril(torch.ones(ctx_len, ctx_len)))
 
-    def forward(self, x: Tensor) -> Tensor:
-        """x (B, T, n_embd) -> (B, T, n_embd)."""
+    def forward(
+        self,
+        x: Tensor,
+        cache: KVCache | PagedKVCache | None = None,
+        layer: int = 0,
+        start_pos: int | Tensor = 0,
+    ) -> Tensor:
+        """x (B, T, n_embd) -> (B, T, n_embd). x holds positions [start_pos, start_pos + T).
+
+        start_pos is one int for the whole batch, or a (B,) tensor: one start per sequence (B3).
+        """
         B, T, C = x.shape
         hs, nh, nkv = self.head_size, self.n_head, self.n_kv_head
         g = nh // nkv  # query heads per k/v head (the group size)
@@ -46,14 +63,20 @@ class GroupedQueryAttention(nn.Module):
         # 2. k, v into their nkv heads -- never copied after this (what v9 caches)
         k = k.view(B, T, nkv, hs).transpose(1, 2)  # (B, nkv, T, hs)
         v = v.view(B, T, nkv, hs).transpose(1, 2)
+        if cache is not None:  # B1: store the new k, v; attend over everything cached so far
+            k, v = cache.update(layer, start_pos, k, v)  # (B, nkv, Tk, hs), Tk = start_pos + T
+        Tk = k.size(2)  # key positions: T without a cache, start_pos + T with one
         # 3. fold each group's g query heads into one tall stack of g*T rows.
         #    Head h = kv * g + j, so heads 0,1 -> kv 0 and heads 2,3 -> kv 1 (Llama's layout).
         q = q.view(B, T, nkv, g, hs).permute(0, 2, 3, 1, 4)  # (B, nkv, g, T, hs)
         q = q.reshape(B, nkv, g * T, hs)  # copies q only (1 token at decode)
         # 4. attention: every row of the stack meets its group's one k/v head
-        wei = q @ k.transpose(-2, -1) * hs**-0.5  # (B, nkv, g*T, T)
-        wei = wei.view(B, nkv, g, T, T).masked_fill(self.tril[:T, :T] == 0, float("-inf"))
-        wei = F.softmax(wei, dim=-1).view(B, nkv, g * T, T)
+        wei = q @ k.transpose(-2, -1) * hs**-0.5  # (B, nkv, g*T, Tk)
+        # mask rows = this chunk's positions, columns = every key position up to the last one
+        mask = self.tril[positions(start_pos, T, x.device)][..., :Tk]  # (B or 1, T, Tk)
+        # a shorter sequence's padded keys sit past its own position, so this hides them too
+        wei = wei.view(B, nkv, g, T, Tk).masked_fill(mask[:, None, None] == 0, float("-inf"))
+        wei = F.softmax(wei, dim=-1).view(B, nkv, g * T, Tk)
         out = wei @ v  # (B, nkv, g*T, hs)
         # 5. unfold back to nh heads, heads side by side, mix
         out = out.view(B, nh, T, hs).transpose(1, 2).contiguous().view(B, T, C)
@@ -98,9 +121,20 @@ class ModernBlock(model.Block):
         if rmsnorm:  # step 2; off by default so step-1 checkpoints still load
             self.ln1, self.ln2 = RMSNorm(n_embd), RMSNorm(n_embd)
 
+    def forward(
+        self,
+        x: Tensor,
+        cache: KVCache | PagedKVCache | None = None,
+        layer: int = 0,
+        start_pos: int | Tensor = 0,
+    ) -> Tensor:
+        """Same as Block, plus the cache handed down to attention."""
+        x = x + self.sa(self.ln1(x), cache, layer, start_pos)
+        return x + self.ffwd(self.ln2(x))
+
 
 class ModernGPT(model.GPT):
-    """F5 GPT built from ModernBlocks. Same forward, generate and init."""
+    """F5 GPT built from ModernBlocks, plus a KV cache (v9 B1). Same init and generate."""
 
     def __init__(
         self,
@@ -123,3 +157,61 @@ class ModernGPT(model.GPT):
         if rmsnorm:
             self.ln_f = RMSNorm(n_embd)
         self.apply(self._init_weights)  # the new blocks need the GPT-2 init too
+
+    def forward(  # type: ignore[override]  # adds cache and start_pos
+        self,
+        idx: Tensor,
+        targets: Tensor | None = None,
+        cache: KVCache | PagedKVCache | None = None,
+        start_pos: int | Tensor = 0,
+    ) -> tuple[Tensor, Tensor | None]:
+        """idx (B, T) holds positions [start_pos, start_pos + T). No cache: start_pos is 0.
+
+        start_pos may be a (B,) tensor when the sequences in the batch are at different points.
+        """
+        _, T = idx.shape
+        pos = positions(start_pos, T, idx.device)  # (B or 1, T): real positions
+        if int(pos.max()) >= self.ctx_len:
+            raise ValueError(f"positions up to {int(pos.max()) + 1} exceed ctx_len={self.ctx_len}")
+        x = self.token_embedding_table(idx) + self.position_embedding_table(pos)
+        for layer, block in enumerate(self.blocks):
+            x = block(x, cache, layer, start_pos)
+        logits = self.lm_head(self.ln_f(x))
+        if targets is None:
+            return logits, None
+        B, T, V = logits.shape
+        return logits, F.cross_entropy(logits.view(B * T, V), targets.view(B * T))
+
+    def new_cache(self, batch_size: int, device: torch.device | str) -> KVCache:
+        """An empty KVCache sized for this model."""
+        sa = self.blocks[0].sa
+        return KVCache(
+            len(self.blocks), batch_size, sa.n_kv_head, self.ctx_len, sa.head_size, device
+        )
+
+    @torch.no_grad()
+    def generate_cached(
+        self,
+        idx: Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        generator: torch.Generator | None = None,
+        cache: KVCache | PagedKVCache | None = None,
+    ) -> Tensor:
+        """Prefill the prompt once, then feed one token per step. v9 B1.
+
+        Learned positions: prompt + new tokens must fit in ctx_len (no cropping like generate).
+        cache: an empty cache to fill (B2 passes a PagedKVCache); default a contiguous one.
+        """
+        B, T = idx.shape
+        if T + max_new_tokens > self.ctx_len:
+            raise ValueError(f"prompt {T} + {max_new_tokens} new > ctx_len={self.ctx_len}")
+        cache = cache or self.new_cache(B, idx.device)
+        logits, _ = self(idx, cache=cache, start_pos=0)  # prefill: whole prompt, fills the cache
+        for i in range(max_new_tokens):
+            idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)  # (B, 1)
+            idx = torch.cat((idx, idx_next), dim=1)
+            if i < max_new_tokens - 1:  # decode: only the new token goes through the model
+                logits, _ = self(idx_next, cache=cache, start_pos=T + i)
+        return idx
