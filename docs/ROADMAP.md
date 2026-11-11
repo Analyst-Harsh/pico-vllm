@@ -1,6 +1,8 @@
 # pico-vllm roadmap
 
-Every session, in order. A session is about 90 minutes; the protocol is in [CLAUDE.md](../CLAUDE.md). ✍️ marks code the owner writes. In this repo that's all of it, so ✍️ flags the pieces that matter most for interviews (from Fryday roadmap §5).
+> **My personal learning plan, kept as a record.** The codes (F4–F6, v9, B1–B5) refer to my Fryday roadmap; file paths are as they were at the time (the code now lives in `model/` and `serving/`, see [DESIGN](DESIGN.md#engine-v9)). To study the repo, start from the [README](../README.md).
+
+Every session, in order, as planned. A session is about 90 minutes. ✍️ flags the pieces that matter most.
 
 **Where this sits in Fryday's plan:**
 
@@ -39,7 +41,7 @@ v9 comes before v8 on purpose: Triton is easier to judge once you've built an en
 > Hint to remember: scale by `head_size ** -0.5`, not by the embedding size.
 
 **Exit criteria:**
-- `make test` is green, and the learner marker on `Head` is removed.
+- `make test` is green, including the new `Head` test.
 - An EXPERIMENTS entry: step-0 loss predicted vs actual; val loss bigram vs one head; iterations; wall time; chip.
 - A LEARNING entry in Fryday.
 
@@ -110,7 +112,7 @@ The best result becomes the checkpoint v9 serves. RoPE and SwiGLU stay in the ba
 
 ## v9 B2: paged KV
 - **✍️ Write:**
-  - **`BlockAllocator`**: `allocate() -> int`, `free(block_id)`, `num_free`, and raise when out of blocks. This is the §5 interview piece.
+  - **`BlockAllocator`**: `allocate() -> int`, `free(block_id)`, `num_free`, and raise when out of blocks.
   - The KV pool per layer: `(num_blocks, page_size, n_kv_head, head_size)` (GQA from F6 shrinks it).
   - A block table per sequence.
   - Attention that gathers K and V through the block table.
@@ -122,7 +124,7 @@ The best result becomes the checkpoint v9 serves. RoPE and SwiGLU stay in the ba
   - `Sequence` (WAITING → RUNNING → FINISHED) and `engine.py` (`add_request`, `step`, `run`).
   - A static-batching baseline.
   - `bench.py`: a seeded synthetic workload with random prompt and output lengths, and arrivals per step.
-  - **`Scheduler.step()`**: admit waiting sequences FIFO while blocks and `max_num_seqs` allow, run decode, retire finished sequences and free their blocks. This is the §5 interview piece.
+  - **`Scheduler.step()`**: admit waiting sequences FIFO while blocks and `max_num_seqs` allow, run decode, retire finished sequences and free their blocks.
 - **Test:** continuous-batching outputs == sequential greedy outputs.
 - **Measure:** tokens/step, batch utilisation, padding waste, TTFT and TPOT in steps, and wall-clock labelled indicative.
 - **Exit:** a static vs continuous table in EXPERIMENTS and in the README.
