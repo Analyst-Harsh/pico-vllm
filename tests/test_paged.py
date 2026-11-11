@@ -3,8 +3,10 @@
 import pytest
 import torch
 
-from pico_vllm.kv_cache import BlockAllocator, KVCache, OutOfBlocksError, PagedKVCache
 from pico_vllm.modern import ModernGPT
+from pico_vllm.serving.block_allocator import BlockAllocator, OutOfBlocksError
+from pico_vllm.serving.kv_cache import KVCache
+from pico_vllm.serving.paged_kv_cache import PagedKVCache
 
 V, C, NH, NKV, NL, CTX, PAGE = 65, 16, 4, 2, 2, 32, 4
 HS = C // NH

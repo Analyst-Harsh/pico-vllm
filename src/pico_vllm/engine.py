@@ -21,9 +21,10 @@ from enum import Enum
 
 import torch
 
-from pico_vllm.kv_cache import OutOfBlocksError, PagedKVCache
 from pico_vllm.modern import ModernGPT
 from pico_vllm.sampler import sample_next
+from pico_vllm.serving.block_allocator import OutOfBlocksError
+from pico_vllm.serving.paged_kv_cache import PagedKVCache
 
 
 class Status(Enum):
