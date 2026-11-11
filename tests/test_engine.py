@@ -1,4 +1,4 @@
-"""v9 B3: the engine. Batched, interleaved, preempted: outputs must equal one-at-a-time greedy."""
+"""The engine. Batched, interleaved, preempted: outputs must equal one-at-a-time greedy."""
 
 import random
 

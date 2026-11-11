@@ -1,4 +1,4 @@
-"""v9 B1: KV cache. Cached results must equal recomputing everything."""
+"""The KV cache. Cached results must equal recomputing everything."""
 
 import pytest
 import torch

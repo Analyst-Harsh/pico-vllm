@@ -1,4 +1,14 @@
-"""Attention: one head, looped heads, batched heads, grouped-query heads."""
+"""What this file teaches: attention, as one progression of four classes.
+
+Key idea: each token builds a query, compares it with every earlier token's key (softmax of q·k),
+and takes the weighted average of their values. The four versions compute the same thing:
+  Head                  one head
+  MultiHeadAttention    n_head Heads in a Python loop, outputs concatenated
+  CausalSelfAttention   every head in one batched matmul (heads are a tensor dimension)
+  GroupedQueryAttention several query heads share one k/v head: a smaller KV cache
+
+Read next: model/gpt.py (attention stacked into a transformer).
+"""
 
 import torch
 from torch import Tensor, nn
@@ -47,12 +57,13 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         """x (B, T, n_embd) -> (B, T, n_embd)."""
-        out = torch.cat([h(x) for h in self.heads], dim=-1)  # n_head * (B, T, hs) -> (B, T, n_embd)
+        # n_head outputs of (B, T, hs), side by side -> (B, T, n_embd)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)  # (B, T, n_embd)
         return self.dropout(self.proj(out))
 
 
 class CausalSelfAttention(nn.Module):
-    """All heads in one go: heads are a tensor dimension, not a Python loop. F6 step 1.
+    """All heads in one go: heads are a tensor dimension, not a Python loop.
 
     Same maths as MultiHeadAttention; one big matmul instead of n_head small ones.
     """
@@ -78,8 +89,8 @@ class CausalSelfAttention(nn.Module):
         q, k, v = self.c_attn(x).split(C, dim=-1)  # each (B, T, C)
         # 2. cut C into n_head slices of hs, then move heads next to batch
         q = q.view(B, T, self.n_head, hs).transpose(1, 2)  # (B, nh, T, hs)
-        k = k.view(B, T, self.n_head, hs).transpose(1, 2)
-        v = v.view(B, T, self.n_head, hs).transpose(1, 2)
+        k = k.view(B, T, self.n_head, hs).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, hs).transpose(1, 2)  # (B, nh, T, hs)
         # 3. same as Head, but every head in one batched matmul
         wei = q @ k.transpose(-2, -1) * hs**-0.5  # (B, nh, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
@@ -94,15 +105,16 @@ class CausalSelfAttention(nn.Module):
 
 def positions(start_pos: int | Tensor, T: int, device: torch.device) -> Tensor:
     """Positions of a T-token chunk: (1, T) for one int start, (B, T) for a start per row."""
+    # (B, 1) for a start per row, (1, 1) for one shared start
     starts = start_pos.view(-1, 1) if isinstance(start_pos, Tensor) else torch.tensor([[start_pos]])
     return starts.to(device) + torch.arange(T, device=device)
 
 
 class GroupedQueryAttention(nn.Module):
-    """GQA: n_head query heads share n_kv_head key/value heads. F6 step 3.
+    """GQA: n_head query heads share n_kv_head key/value heads.
 
     n_kv_head == n_head is model.CausalSelfAttention (MHA); n_kv_head == 1 is multi-query (MQA).
-    Fewer k/v heads -> a smaller KV cache in v9. Llama 3 8B: 32 query heads, 8 k/v heads.
+    Fewer k/v heads -> a smaller KV cache when serving. Llama 3 8B: 32 query heads, 8 k/v heads.
     """
 
     tril: Tensor
@@ -133,31 +145,35 @@ class GroupedQueryAttention(nn.Module):
     ) -> Tensor:
         """x (B, T, n_embd) -> (B, T, n_embd). x holds positions [start_pos, start_pos + T).
 
-        start_pos is one int for the whole batch, or a (B,) tensor: one start per sequence (B3).
+        start_pos is one int for the whole batch, or a (B,) tensor: one start per sequence
+        (the engine's batched decode).
         """
         B, T, C = x.shape
         hs, nh, nkv = self.head_size, self.n_head, self.n_kv_head
         g = nh // nkv  # query heads per k/v head (the group size)
         # 1. one matmul, uneven split: full-width q, narrow k and v
+        # q (B, T, C); k, v (B, T, nkv*hs)
         q, k, v = self.c_attn(x).split([C, nkv * hs, nkv * hs], dim=-1)
-        # 2. k, v into their nkv heads -- never copied after this (what v9 caches)
+        # 2. k, v into their nkv heads -- never copied after this (what the KV cache stores)
         k = k.view(B, T, nkv, hs).transpose(1, 2)  # (B, nkv, T, hs)
-        v = v.view(B, T, nkv, hs).transpose(1, 2)
-        if cache is not None:  # B1: store the new k, v; attend over everything cached so far
+        v = v.view(B, T, nkv, hs).transpose(1, 2)  # (B, nkv, T, hs)
+        if cache is not None:  # store the new k, v; attend over everything cached so far
             k, v = cache.update(layer, start_pos, k, v)  # (B, nkv, Tk, hs), Tk = start_pos + T
         Tk = k.size(2)  # key positions: T without a cache, start_pos + T with one
         # 3. fold each group's g query heads into one tall stack of g*T rows.
         #    Head h = kv * g + j, so heads 0,1 -> kv 0 and heads 2,3 -> kv 1 (Llama's layout).
         q = q.view(B, T, nkv, g, hs).permute(0, 2, 3, 1, 4)  # (B, nkv, g, T, hs)
-        q = q.reshape(B, nkv, g * T, hs)  # copies q only (1 token at decode)
+        q = q.reshape(B, nkv, g * T, hs)  # (B, nkv, g*T, hs); copies q only (1 token at decode)
         # 4. attention: every row of the stack meets its group's one k/v head
         wei = q @ k.transpose(-2, -1) * hs**-0.5  # (B, nkv, g*T, Tk)
         # mask rows = this chunk's positions, columns = every key position up to the last one
         mask = self.tril[positions(start_pos, T, x.device)][..., :Tk]  # (B or 1, T, Tk)
         # a shorter sequence's padded keys sit past its own position, so this hides them too
+        # view as (B, nkv, g, T, Tk) so the (B or 1, T, Tk) mask broadcasts over the heads
         wei = wei.view(B, nkv, g, T, Tk).masked_fill(mask[:, None, None] == 0, float("-inf"))
-        wei = F.softmax(wei, dim=-1).view(B, nkv, g * T, Tk)
+        wei = F.softmax(wei, dim=-1).view(B, nkv, g * T, Tk)  # (B, nkv, g*T, Tk)
         out = wei @ v  # (B, nkv, g*T, hs)
         # 5. unfold back to nh heads, heads side by side, mix
+        # (B, nkv, g*T, hs) -> (B, nh, T, hs) -> (B, T, nh, hs) -> (B, T, C)
         out = out.view(B, nh, T, hs).transpose(1, 2).contiguous().view(B, T, C)
         return self.dropout(self.proj(out))

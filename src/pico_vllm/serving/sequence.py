@@ -1,4 +1,10 @@
-"""v9 B3: a request's life cycle and the per-step stats the engine records."""
+"""What this file teaches: a request's life cycle, and what the engine records each step.
+
+Key idea: PENDING -> WAITING -> RUNNING -> FINISHED, and a preempted sequence goes back to WAITING.
+TTFT and TPOT are measured in engine steps, not seconds.
+
+Read next: serving/engine.py.
+"""
 
 from dataclasses import dataclass, field
 from enum import Enum

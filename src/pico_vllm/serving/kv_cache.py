@@ -1,6 +1,10 @@
-"""v9 B1: a contiguous KV cache. Every sequence gets ctx_len slots per layer up front.
+"""What this file teaches: the KV cache, the first serving efficiency.
 
-B2 replaces this with pages (blocks handed out on demand) to stop reserving unused slots.
+Key idea: a token's keys and values never change once computed, so store them per layer and only run
+the newest token through the model at each step. This contiguous version reserves ctx_len
+slots per sequence up front, which wastes the tail of every short reply.
+
+Read next: serving/block_allocator.py (the first piece of the paged fix).
 """
 
 import torch
@@ -21,7 +25,8 @@ class KVCache:
         dtype: torch.dtype = torch.float32,
     ) -> None:
         shape = (n_layer, batch_size, n_kv_head, ctx_len, head_size)
-        # ponytail: reserves ctx_len slots per sequence even if it stops early; B2 pages it
+        # Simplification: reserves ctx_len slots per sequence even if it stops early;
+        # PagedKVCache hands out pages on demand instead
         self.k = torch.zeros(shape, device=device, dtype=dtype)
         self.v = torch.zeros(shape, device=device, dtype=dtype)
 

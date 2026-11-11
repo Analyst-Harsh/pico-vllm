@@ -1,4 +1,4 @@
-"""F5 step 3 target: src/pico_vllm/sample.py."""
+"""The sampler: temperature, top-k, greedy (sampler.py)."""
 
 import pytest
 import torch

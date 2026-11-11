@@ -1,4 +1,10 @@
-"""F4 step 1: text -> token ids -> (x, y) training batches."""
+"""What this file teaches: how raw text becomes training batches.
+
+Key idea: every character is a token id, and the target y is just x shifted one token to the right,
+so one window of T tokens holds T next-token predictions.
+
+Read next: model/baselines.py (the simplest models that learn from these batches).
+"""
 
 import torch
 from torch import Tensor
@@ -32,6 +38,6 @@ def train_val_split(data: Tensor) -> tuple[Tensor, Tensor]:
 def get_batch(data: Tensor, B: int, T: int, device: str | torch.device) -> tuple[Tensor, Tensor]:
     """B random windows of length T from data. y is x shifted one token to the right."""
     ix = torch.randint(len(data) - T, (B,))
-    x = torch.stack([data[i : i + T] for i in ix])
-    y = torch.stack([data[i + 1 : i + T + 1] for i in ix])
+    x = torch.stack([data[i : i + T] for i in ix])  # (B, T)
+    y = torch.stack([data[i + 1 : i + T + 1] for i in ix])  # (B, T)
     return x.to(device), y.to(device)

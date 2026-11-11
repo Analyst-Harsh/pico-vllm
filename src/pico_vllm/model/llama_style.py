@@ -1,6 +1,10 @@
-"""F6: Llama-style building blocks (GQA, RMSNorm) on top of model.py.
+"""What this file teaches: the Llama-style changes, and the model the engine serves.
 
-model.py keeps the F4-F5 GPT unchanged, so old checkpoints and experiments still load.
+Key idea: RMSNorm drops LayerNorm's mean and bias; GroupedQueryAttention shrinks the KV cache.
+ModernGPT also takes a cache and a start_pos, so it can prefill a prompt once and then feed
+one token per step instead of recomputing the whole window. (No RoPE or SwiGLU.)
+
+Read next: train.py (how every model here was trained), then serving/kv_cache.py.
 """
 
 import torch
@@ -15,7 +19,7 @@ from pico_vllm.serving.paged_kv_cache import PagedKVCache
 
 
 class RMSNorm(nn.Module):
-    """LayerNorm without the mean: only rescale each token to root-mean-square 1. F6 step 2.
+    """LayerNorm without the mean: only rescale each token to root-mean-square 1.
 
     Llama uses this. One learned weight per channel, no bias.
     """
@@ -34,7 +38,7 @@ class RMSNorm(nn.Module):
 
 
 class ModernBlock(Block):
-    """F5 Block with batched GQA attention (step 1/3) and optional RMSNorm (step 2)."""
+    """The GPT-2-style Block with batched GQA attention and optional RMSNorm."""
 
     def __init__(
         self,
@@ -46,10 +50,10 @@ class ModernBlock(Block):
         n_kv_head: int | None = None,
     ) -> None:
         super().__init__(n_embd, n_head, ctx_len, dropout)
-        # n_kv_head None -> n_head: plain MHA, same weights as CausalSelfAttention, so step-1/2
-        # checkpoints still load
+        # n_kv_head None -> n_head: plain MHA, same weights as CausalSelfAttention, so checkpoints
+        # trained before GQA still load
         self.sa = GroupedQueryAttention(n_embd, n_head, n_kv_head or n_head, ctx_len, dropout)
-        if rmsnorm:  # step 2; off by default so step-1 checkpoints still load
+        if rmsnorm:  # off by default so checkpoints trained before RMSNorm still load
             self.ln1, self.ln2 = RMSNorm(n_embd), RMSNorm(n_embd)
 
     def forward(
@@ -65,7 +69,7 @@ class ModernBlock(Block):
 
 
 class ModernGPT(GPT):
-    """F5 GPT built from ModernBlocks, plus a KV cache (v9 B1). Same init and generate."""
+    """The GPT built from ModernBlocks, plus a KV cache. Same init and generate."""
 
     def __init__(
         self,
@@ -104,14 +108,15 @@ class ModernGPT(GPT):
         pos = positions(start_pos, T, idx.device)  # (B or 1, T): real positions
         if int(pos.max()) >= self.ctx_len:
             raise ValueError(f"positions up to {int(pos.max()) + 1} exceed ctx_len={self.ctx_len}")
-        x = self.token_embedding_table(idx) + self.position_embedding_table(pos)
+        x = self.token_embedding_table(idx) + self.position_embedding_table(pos)  # (B, T, C)
         for layer, block in enumerate(self.blocks):
             x = block(x, cache, layer, start_pos)
-        logits = self.lm_head(self.ln_f(x))
+        logits = self.lm_head(self.ln_f(x))  # (B, T, V)
         if targets is None:
             return logits, None
         B, T, V = logits.shape
-        return logits, F.cross_entropy(logits.view(B * T, V), targets.view(B * T))
+        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))  # (B*T, V), (B*T,)
+        return logits, loss
 
     def new_cache(self, batch_size: int, device: torch.device | str) -> KVCache:
         """An empty KVCache sized for this model."""
@@ -130,10 +135,10 @@ class ModernGPT(GPT):
         generator: torch.Generator | None = None,
         cache: KVCache | PagedKVCache | None = None,
     ) -> Tensor:
-        """Prefill the prompt once, then feed one token per step. v9 B1.
+        """Prefill the prompt once, then feed one token per step.
 
         Learned positions: prompt + new tokens must fit in ctx_len (no cropping like generate).
-        cache: an empty cache to fill (B2 passes a PagedKVCache); default a contiguous one.
+        cache: an empty cache to fill (e.g. a PagedKVCache); default a contiguous one.
         """
         B, T = idx.shape
         if T + max_new_tokens > self.ctx_len:
@@ -142,7 +147,7 @@ class ModernGPT(GPT):
         logits, _ = self(idx, cache=cache, start_pos=0)  # prefill: whole prompt, fills the cache
         for i in range(max_new_tokens):
             idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)  # (B, 1)
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx = torch.cat((idx, idx_next), dim=1)  # (B, T + i + 1)
             if i < max_new_tokens - 1:  # decode: only the new token goes through the model
                 logits, _ = self(idx_next, cache=cache, start_pos=T + i)
         return idx

@@ -1,4 +1,11 @@
-"""A GPT-2-style transformer."""
+"""What this file teaches: a GPT-2-style transformer, trained from scratch.
+
+Key idea: a Block is communicate (attention, tokens talk) then compute (feed-forward, each token
+alone), both with pre-norm and a residual. Stack n_layer Blocks between the embeddings and
+lm_head and you have a GPT.
+
+Read next: sampler.py (turning logits into the next token), then model/llama_style.py.
+"""
 
 import torch
 from torch import Tensor, nn
@@ -45,7 +52,7 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
-    """Token + position embeddings -> n_layer Blocks -> final LayerNorm -> lm_head. F5."""
+    """Token + position embeddings -> n_layer Blocks -> final LayerNorm -> lm_head."""
 
     def __init__(
         self,
@@ -87,7 +94,8 @@ class GPT(nn.Module):
         if targets is None:
             return logits, None
         B, T, V = logits.shape
-        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))
+        # cross_entropy wants (N, V) logits and (N,) targets: flatten batch and time
+        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))  # (B*T, V), (B*T,)
         return logits, loss
 
     @torch.no_grad()
@@ -99,9 +107,10 @@ class GPT(nn.Module):
         top_k: int | None = None,
         generator: torch.Generator | None = None,
     ) -> Tensor:
-        """Crop to ctx_len, predict, sample, append. v9 B1 makes this fast with a KV cache."""
+        """Crop to ctx_len, predict, sample, append. Recomputes the whole window every token;
+        ModernGPT.generate_cached removes that work with a KV cache."""
         for _ in range(max_new_tokens):
             logits, _ = self(idx[:, -self.ctx_len :])
             idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx = torch.cat((idx, idx_next), dim=1)  # (B, T + 1)
         return idx

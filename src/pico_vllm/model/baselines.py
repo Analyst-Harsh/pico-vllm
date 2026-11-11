@@ -1,4 +1,10 @@
-"""Warm-up models: the bigram and a single attention head."""
+"""What this file teaches: the two warm-up language models.
+
+Key idea: the bigram predicts the next character from the current one alone (one table lookup);
+adding a single attention head lets each token look back at its past, and the loss drops.
+
+Read next: model/attention.py (that head, then the versions real models use).
+"""
 
 import torch
 from torch import Tensor, nn
@@ -8,7 +14,7 @@ from pico_vllm.model.attention import Head
 
 
 class SingleHeadLanguageModel(nn.Module):
-    """Token + position embeddings -> one attention head -> lm_head. F4 step 4."""
+    """Token + position embeddings -> one attention head -> lm_head."""
 
     def __init__(self, vocab_size: int, n_embd: int, ctx_len: int) -> None:
         super().__init__()
@@ -28,7 +34,8 @@ class SingleHeadLanguageModel(nn.Module):
         if targets is None:
             return logits, None
         B, T, V = logits.shape
-        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))
+        # cross_entropy wants (N, V) logits and (N,) targets: flatten batch and time
+        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))  # (B*T, V), (B*T,)
         return logits, loss
 
     @torch.no_grad()
@@ -37,7 +44,7 @@ class SingleHeadLanguageModel(nn.Module):
         for _ in range(max_new_tokens):
             logits, _ = self(idx[:, -self.ctx_len :])
             probs = F.softmax(logits[:, -1, :], dim=-1)
-            idx = torch.cat((idx, torch.multinomial(probs, num_samples=1)), dim=1)
+            idx = torch.cat((idx, torch.multinomial(probs, num_samples=1)), dim=1)  # (B, T + 1)
         return idx
 
 
@@ -54,7 +61,8 @@ class BigramLanguageModel(nn.Module):
         if targets is None:
             return logits, None
         B, T, V = logits.shape
-        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))
+        # cross_entropy wants (N, V) logits and (N,) targets: flatten batch and time
+        loss = F.cross_entropy(logits.view(B * T, V), targets.view(B * T))  # (B*T, V), (B*T,)
         return logits, loss
 
     @torch.no_grad()

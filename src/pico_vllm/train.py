@@ -1,6 +1,11 @@
-"""F4/F5: train a model on tiny-shakespeare.
+"""What this file teaches: the training loop, and the config of every model in EXPERIMENTS.
 
-Run: uv run python -m pico_vllm.train --model <name in CONFIGS>
+Key idea: sample a random batch, compute cross-entropy on the next-token targets, step AdamW,
+and report the loss averaged over many batches. Each config changes one thing from the last.
+
+Run: uv run python -m pico_vllm.train --model <name in CONFIGS>   (gpt-m-gqa2 is the served one)
+
+Read next: serving/kv_cache.py.
 """
 
 import argparse
@@ -33,19 +38,19 @@ CONFIGS = {
         "dropout": 0.0,
     },
 }
-# F5 scaling, one change at a time (EXPERIMENTS 2026-11-02)
+# Scaling the GPT, one change at a time (EXPERIMENTS 2026-11-02)
 CONFIGS["gpt-drop"] = {**CONFIGS["gpt"], "dropout": 0.2}  # A: same size + dropout
 CONFIGS["gpt-m"] = {**CONFIGS["gpt-drop"], "T": 64, "n_embd": 128}  # B: wider, longer ctx
 CONFIGS["gpt-m-nodrop"] = {**CONFIGS["gpt-m"], "dropout": 0.0}  # B without dropout
-# F5 step 5: head-count sweep (same params; only how attention is split changes)
+# Head-count sweep (same params; only how attention is split changes)
 CONFIGS["gpt-m-h1"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 1}
 CONFIGS["gpt-m-h8"] = {**CONFIGS["gpt-m-nodrop"], "n_head": 8}
-# F6 step 1: batched heads (modern.py), same configs as the looped runs above
+# Llama-style: batched heads (ModernGPT), same configs as the looped runs above
 CONFIGS["gpt-m-csa"] = {**CONFIGS["gpt-m-nodrop"], "modern": True}
 CONFIGS["gpt-m-csa-h8"] = {**CONFIGS["gpt-m-h8"], "modern": True}
-# F6 step 2: RMSNorm in place of every LayerNorm
+# RMSNorm in place of every LayerNorm
 CONFIGS["gpt-m-rms"] = {**CONFIGS["gpt-m-csa"], "rmsnorm": True}
-# F6 step 3: GQA, query heads stay 4, k/v heads 2 and 1 (4 = gpt-m-rms)
+# GQA: query heads stay 4, k/v heads 2 and 1 (4 = gpt-m-rms)
 CONFIGS["gpt-m-gqa2"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 2}
 CONFIGS["gpt-m-gqa1"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 1}
 
@@ -123,7 +128,7 @@ def main() -> None:
         loss.backward()
         optimizer.step()
 
-    if isinstance(model, GPT):  # v9 serves one of these
+    if isinstance(model, GPT):  # the engine serves one of these
         path = CHECKPOINT_DIR / f"{name}.pt"
         path.parent.mkdir(exist_ok=True)
         torch.save({"model": model.state_dict(), "config": cfg, "chars": tok.itos}, path)

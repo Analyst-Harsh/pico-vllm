@@ -1,4 +1,12 @@
-"""v9 B2-B4: the paged KV cache, with prefix caching."""
+"""What this file teaches: PagedAttention's memory layout, and prefix caching.
+
+Key idea: one shared pool of pages per layer; each sequence has a block table (its i-th page
+lives in block table[i]), so memory grows a page at a time and is never reserved for the
+longest reply. With prefix caching, every full page gets a name chained from the start of the text,
+so a new request whose prompt starts the same way reuses those pages instead of recomputing.
+
+Read next: serving/sequence.py, then serving/engine.py.
+"""
 
 import torch
 from torch import Tensor
@@ -7,13 +15,13 @@ from pico_vllm.serving.block_allocator import BlockAllocator
 
 
 class PagedKVCache:
-    """KV cache in fixed-size pages, handed out on demand. v9 B2, keyed by sequence in B3.
+    """KV cache in fixed-size pages, handed out on demand, keyed by sequence id.
 
     One shared pool per layer: (num_blocks, page_size, n_kv_head, head_size). Each sequence
     has a block table: its i-th page lives in physical block table[i]. The same block id is
     used in every layer's pool, like vLLM. bind() says which sequence each batch row is.
 
-    prefix_caching (B4): every full page gets a name, hash(previous page's name, its tokens),
+    prefix_caching: every full page gets a name, hash(previous page's name, its tokens),
     so equal names mean equal text from the very start. A new sequence reuses the pages of
     its longest named prefix (shared while in use, revived if freed but not yet overwritten).
     """
@@ -37,7 +45,7 @@ class PagedKVCache:
         self.allocator = BlockAllocator(num_blocks)
         self.block_tables: dict[int, list[int]] = {}  # sequence id -> its pages, in order
         self.bind(list(range(batch_size)))  # generate_cached: row i is sequence i
-        # B4 prefix caching
+        # prefix caching
         self.prefix_caching = prefix_caching
         self.cached: dict[int, int] = {}  # page name -> block holding that text
         self.block_name: dict[int, int] = {}  # block -> its page name (while it holds it)
@@ -75,11 +83,11 @@ class PagedKVCache:
             start = int(start_pos[row]) if isinstance(start_pos, Tensor) else start_pos
             blocks, offsets = self._slots(seq_id, start, start + T)
             self.k[layer, blocks, offsets] = k[row].transpose(0, 1)  # (T, n_kv, hs) into pages
-            self.v[layer, blocks, offsets] = v[row].transpose(0, 1)
+            self.v[layer, blocks, offsets] = v[row].transpose(0, 1)  # (T, n_kv, hs)
             blocks, offsets = self._slots(seq_id, 0, start + T)  # every position back, in order
             ks.append(self.k[layer, blocks, offsets].transpose(0, 1))  # (n_kv, start + T, hs)
-            vs.append(self.v[layer, blocks, offsets].transpose(0, 1))
-        # ponytail: gathers (copies) every history each step and pads to the longest; a
+            vs.append(self.v[layer, blocks, offsets].transpose(0, 1))  # (n_kv, start + T, hs)
+        # Simplification: gathers (copies) every history each step and pads to the longest; a
         # PagedAttention kernel reads pages in place. DESIGN "Gaps vs vLLM": attention kernel.
         longest = max(x.size(1) for x in ks)
         k_out, v_out = k.new_zeros(B, n_kv, longest, hs), v.new_zeros(B, n_kv, longest, hs)
@@ -89,15 +97,15 @@ class PagedKVCache:
         return k_out, v_out
 
     def free_seq(self, seq_id: int) -> None:
-        """Return one sequence's pages to the pool (B3: the moment it finishes).
+        """Return one sequence's pages to the pool (the moment it finishes).
 
-        Named pages keep their name and content (B4): until overwritten, they can be revived.
+        Named pages keep their name and content: until overwritten, they can be revived.
         """
         for block in self.block_tables.pop(seq_id, []):
             self.allocator.free(block)
         self.seq_names.pop(seq_id, None)
 
-    # ---- B4: prefix caching -----------------------------------------------------------------
+    # ---- prefix caching ---------------------------------------------------------------------
 
     def _allocate(self) -> int:
         block = self.allocator.allocate()
@@ -111,7 +119,7 @@ class PagedKVCache:
         for i in range(len(names), n_pages):
             parent = names[-1] if names else None
             page = tuple(tokens[i * self.page_size : (i + 1) * self.page_size])
-            # ponytail: Python's hash; production uses a strong hash (vLLM: optional SHA-256)
+            # Simplification: Python's hash; production uses a strong hash (vLLM: optional SHA-256)
             names.append(hash((parent, page)))
         return names
 

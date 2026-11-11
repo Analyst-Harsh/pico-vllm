@@ -1,4 +1,4 @@
-"""F4 step 1 target: src/pico_vllm/data.py."""
+"""The character tokenizer and batching (data.py)."""
 
 from pathlib import Path
 

@@ -1,6 +1,7 @@
-"""v9 B3: a tiny serving engine. Continuous batching over the paged KV cache.
+"""What this file teaches: continuous batching, the scheduler loop of a serving engine.
 
-One step:
+Key idea: schedule per step, not per batch. A finished request leaves at once and a waiting
+one takes its slot in the same step, so the batch stays full. One step:
   1. decode one token for every running sequence (one batched forward),
   2. retire finished sequences and free their pages at once,
   3. admit waiting sequences (FIFO) while pages and max_num_seqs allow; each is prefilled
@@ -8,11 +9,13 @@ One step:
 Out of pages mid-decode: preempt the most recently admitted sequence (free its pages,
 recompute it later), as vLLM does.
 
-prefix_caching=True (B4): a newcomer reuses the cached pages of its longest shared prompt start
+prefix_caching=True: a newcomer reuses the cached pages of its longest shared prompt start
 and prefills only the rest.
 
 policy="static" is the baseline: a batch reserves pages for its full length, runs until its
 longest member is done (finished members keep their slot), and only then is the next admitted.
+
+Read next: bench.py (static vs continuous, prefix caching off vs on).
 """
 
 from collections import deque
@@ -62,7 +65,7 @@ class Engine:
         self.step_no = 0
         self.preemptions = 0
         self.prefill_computed = 0  # prompt tokens pushed through the model at prefill
-        self.prefill_cached = 0  # prompt tokens skipped thanks to prefix caching (B4)
+        self.prefill_cached = 0  # prompt tokens skipped thanks to prefix caching
         self._next_id = 0
 
     # ---- requests -------------------------------------------------------------------------
@@ -143,7 +146,7 @@ class Engine:
         return seqs
 
     def _preempt(self, s: Sequence) -> None:
-        # ponytail: recompute only (re-prefill prompt + output later); vLLM v0 could also swap
+        # Simplification: recompute only (re-prefill prompt + output later); vLLM v0 could also swap
         self.cache.free_seq(s.seq_id)
         self.running.remove(s)
         s.status = Status.WAITING
@@ -186,8 +189,8 @@ class Engine:
         return admitted
 
     def _prefill(self, s: Sequence) -> None:
-        # ponytail: one forward per newcomer; vLLM batches prefills and chunks long ones
-        skip = self.cache.attach_prefix(s.seq_id, s.tokens)  # B4: reuse cached prefix pages
+        # Simplification: one forward per newcomer; vLLM batches prefills and chunks long ones
+        skip = self.cache.attach_prefix(s.seq_id, s.tokens)  # reuse cached prefix pages
         self.cache.bind([s.seq_id])
         rest = torch.tensor([s.tokens[skip:]], device=self.device)
         logits, _ = self.model(rest, cache=self.cache, start_pos=skip)  # only the uncached part

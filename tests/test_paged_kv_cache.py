@@ -1,4 +1,4 @@
-"""v9 B2: paged KV cache. Paged must equal contiguous; blocks are never handed out twice."""
+"""The paged KV cache. Paged must equal contiguous, page boundaries included."""
 
 import pytest
 import torch

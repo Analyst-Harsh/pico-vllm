@@ -1,4 +1,4 @@
-"""v9 B4: prefix caching. Reused pages must give the same outputs as computing everything."""
+"""Prefix caching. Reused pages must give the same outputs as computing everything."""
 
 import torch
 
