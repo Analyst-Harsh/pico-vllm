@@ -5,7 +5,7 @@ import random
 import pytest
 import torch
 
-from pico_vllm.modern import ModernGPT
+from pico_vllm.model.llama_style import ModernGPT
 from pico_vllm.serving.engine import Engine
 from pico_vllm.serving.sequence import Status
 

@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from pico_vllm.model import GPT
+from pico_vllm.model.gpt import GPT
 
 V, C, NH, NL, CTX, B = 11, 16, 4, 2, 8, 2
 

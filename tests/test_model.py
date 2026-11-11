@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.model import BigramLanguageModel, SingleHeadLanguageModel
+from pico_vllm.model.baselines import BigramLanguageModel, SingleHeadLanguageModel
 
 V, B, T = 10, 2, 5
 

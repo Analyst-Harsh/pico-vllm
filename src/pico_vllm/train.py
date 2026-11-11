@@ -10,8 +10,9 @@ import torch
 from torch import Tensor, nn
 
 from pico_vllm.data import CharTokenizer, get_batch, train_val_split
-from pico_vllm.model import GPT, BigramLanguageModel, SingleHeadLanguageModel
-from pico_vllm.modern import ModernGPT
+from pico_vllm.model.baselines import BigramLanguageModel, SingleHeadLanguageModel
+from pico_vllm.model.gpt import GPT
+from pico_vllm.model.llama_style import ModernGPT
 
 SEED = 1337
 EVAL_ITERS = 200

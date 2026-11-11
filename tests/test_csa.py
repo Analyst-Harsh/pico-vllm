@@ -3,8 +3,9 @@
 import pytest
 import torch
 
-from pico_vllm.model import GPT, CausalSelfAttention, MultiHeadAttention
-from pico_vllm.modern import ModernGPT
+from pico_vllm.model.attention import CausalSelfAttention, MultiHeadAttention
+from pico_vllm.model.gpt import GPT
+from pico_vllm.model.llama_style import ModernGPT
 
 B, T, C, NH, CTX = 2, 6, 16, 4, 8
 

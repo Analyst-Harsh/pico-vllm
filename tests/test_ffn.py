@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.model import FeedForward
+from pico_vllm.model.gpt import FeedForward
 
 B, T, C = 2, 5, 16
 

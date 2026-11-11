@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from pico_vllm.model import Head
+from pico_vllm.model.attention import Head
 
 B, T, C, HS, CTX = 2, 6, 16, 4, 8
 

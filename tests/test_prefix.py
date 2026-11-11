@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.modern import ModernGPT
+from pico_vllm.model.llama_style import ModernGPT
 from pico_vllm.serving.block_allocator import BlockAllocator
 from pico_vllm.serving.engine import Engine
 

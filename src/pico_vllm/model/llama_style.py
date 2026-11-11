@@ -7,81 +7,11 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from pico_vllm import model
+from pico_vllm.model.attention import GroupedQueryAttention, positions
+from pico_vllm.model.gpt import GPT, Block
 from pico_vllm.sampler import sample_next
 from pico_vllm.serving.kv_cache import KVCache
 from pico_vllm.serving.paged_kv_cache import PagedKVCache
-
-
-def positions(start_pos: int | Tensor, T: int, device: torch.device) -> Tensor:
-    """Positions of a T-token chunk: (1, T) for one int start, (B, T) for a start per row."""
-    starts = start_pos.view(-1, 1) if isinstance(start_pos, Tensor) else torch.tensor([[start_pos]])
-    return starts.to(device) + torch.arange(T, device=device)
-
-
-class GroupedQueryAttention(nn.Module):
-    """GQA: n_head query heads share n_kv_head key/value heads. F6 step 3.
-
-    n_kv_head == n_head is model.CausalSelfAttention (MHA); n_kv_head == 1 is multi-query (MQA).
-    Fewer k/v heads -> a smaller KV cache in v9. Llama 3 8B: 32 query heads, 8 k/v heads.
-    """
-
-    tril: Tensor
-
-    def __init__(
-        self, n_embd: int, n_head: int, n_kv_head: int, ctx_len: int, dropout: float = 0.0
-    ) -> None:
-        super().__init__()
-        if n_embd % n_head != 0:
-            raise ValueError(f"n_embd={n_embd} must be divisible by n_head={n_head}")
-        if n_head % n_kv_head != 0:
-            raise ValueError(f"n_head={n_head} must be divisible by n_kv_head={n_kv_head}")
-        self.n_head, self.n_kv_head = n_head, n_kv_head
-        self.head_size = n_embd // n_head
-        kv_dim = n_kv_head * self.head_size  # k (and v) width: smaller than n_embd when grouped
-        # output = [q (n_embd) | k (kv_dim) | v (kv_dim)]; same shape as c_attn when not grouped
-        self.c_attn = nn.Linear(n_embd, n_embd + 2 * kv_dim, bias=False)
-        self.proj = nn.Linear(n_embd, n_embd)
-        self.dropout = nn.Dropout(dropout)
-        self.register_buffer("tril", torch.tril(torch.ones(ctx_len, ctx_len)))
-
-    def forward(
-        self,
-        x: Tensor,
-        cache: KVCache | PagedKVCache | None = None,
-        layer: int = 0,
-        start_pos: int | Tensor = 0,
-    ) -> Tensor:
-        """x (B, T, n_embd) -> (B, T, n_embd). x holds positions [start_pos, start_pos + T).
-
-        start_pos is one int for the whole batch, or a (B,) tensor: one start per sequence (B3).
-        """
-        B, T, C = x.shape
-        hs, nh, nkv = self.head_size, self.n_head, self.n_kv_head
-        g = nh // nkv  # query heads per k/v head (the group size)
-        # 1. one matmul, uneven split: full-width q, narrow k and v
-        q, k, v = self.c_attn(x).split([C, nkv * hs, nkv * hs], dim=-1)
-        # 2. k, v into their nkv heads -- never copied after this (what v9 caches)
-        k = k.view(B, T, nkv, hs).transpose(1, 2)  # (B, nkv, T, hs)
-        v = v.view(B, T, nkv, hs).transpose(1, 2)
-        if cache is not None:  # B1: store the new k, v; attend over everything cached so far
-            k, v = cache.update(layer, start_pos, k, v)  # (B, nkv, Tk, hs), Tk = start_pos + T
-        Tk = k.size(2)  # key positions: T without a cache, start_pos + T with one
-        # 3. fold each group's g query heads into one tall stack of g*T rows.
-        #    Head h = kv * g + j, so heads 0,1 -> kv 0 and heads 2,3 -> kv 1 (Llama's layout).
-        q = q.view(B, T, nkv, g, hs).permute(0, 2, 3, 1, 4)  # (B, nkv, g, T, hs)
-        q = q.reshape(B, nkv, g * T, hs)  # copies q only (1 token at decode)
-        # 4. attention: every row of the stack meets its group's one k/v head
-        wei = q @ k.transpose(-2, -1) * hs**-0.5  # (B, nkv, g*T, Tk)
-        # mask rows = this chunk's positions, columns = every key position up to the last one
-        mask = self.tril[positions(start_pos, T, x.device)][..., :Tk]  # (B or 1, T, Tk)
-        # a shorter sequence's padded keys sit past its own position, so this hides them too
-        wei = wei.view(B, nkv, g, T, Tk).masked_fill(mask[:, None, None] == 0, float("-inf"))
-        wei = F.softmax(wei, dim=-1).view(B, nkv, g * T, Tk)
-        out = wei @ v  # (B, nkv, g*T, hs)
-        # 5. unfold back to nh heads, heads side by side, mix
-        out = out.view(B, nh, T, hs).transpose(1, 2).contiguous().view(B, T, C)
-        return self.dropout(self.proj(out))
 
 
 class RMSNorm(nn.Module):
@@ -103,7 +33,7 @@ class RMSNorm(nn.Module):
         return F.rms_norm(x, (x.size(-1),), self.weight, self.eps)  # same maths, one call
 
 
-class ModernBlock(model.Block):
+class ModernBlock(Block):
     """F5 Block with batched GQA attention (step 1/3) and optional RMSNorm (step 2)."""
 
     def __init__(
@@ -134,7 +64,7 @@ class ModernBlock(model.Block):
         return x + self.ffwd(self.ln2(x))
 
 
-class ModernGPT(model.GPT):
+class ModernGPT(GPT):
     """F5 GPT built from ModernBlocks, plus a KV cache (v9 B1). Same init and generate."""
 
     def __init__(

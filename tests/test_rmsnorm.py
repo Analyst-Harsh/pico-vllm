@@ -3,7 +3,7 @@
 import torch
 from torch import nn
 
-from pico_vllm.modern import RMSNorm
+from pico_vllm.model.llama_style import RMSNorm
 
 B, T, C = 2, 6, 16
 

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.model import Block
+from pico_vllm.model.gpt import Block
 
 B, T, C, NH, CTX = 2, 6, 16, 4, 8
 

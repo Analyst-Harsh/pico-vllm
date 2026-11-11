@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from pico_vllm.model import MultiHeadAttention
+from pico_vllm.model.attention import MultiHeadAttention
 
 B, T, C, NH, CTX = 2, 6, 16, 4, 8
 
