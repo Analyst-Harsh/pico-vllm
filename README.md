@@ -30,7 +30,7 @@ It's a sibling of [**Fryday**](https://github.com/Analyst-Harsh/Fryday), my loca
 | v9.1 | KV cache | ✅ |
 | v9.2 | Paged KV: block allocator, block tables | ✅ |
 | v9.3 | Continuous batching: scheduler, engine loop, static-batching baseline | ✅ |
-| v9.4 | Prefix caching: block hashing, ref counts | ⏳ next |
+| v9.4 | Prefix caching: block hashing, ref counts | ✅ |
 
 ## Architecture (the target)
 
@@ -61,7 +61,7 @@ Filled in as each milestone lands. Every number links to its entry in [EXPERIMEN
 |---|---|
 | Val loss: bigram → one head → full GPT | [2.49](docs/EXPERIMENTS.md#2026-11-01-bigram-baseline-on-tiny-shakespeare-f4) → [2.41](docs/EXPERIMENTS.md#2026-11-01-one-attention-head-vs-bigram-f4) → [1.585](docs/EXPERIMENTS.md#2026-11-02-run-b-wider-gpt--ctx-64-dropout-02-vs-0-f5) |
 | Static vs continuous batching (64 mixed requests, 8 slots) | [2.1× fewer steps; tokens/step 3.3 → 7.1; utilisation 41% → 89%; TTFT p50 139 → 8 steps](docs/EXPERIMENTS.md#2026-11-11-static-vs-continuous-batching-v9-b3) |
-| Prefix caching: hit rate, prefill tokens saved | TBD |
+| Prefix caching (64 requests sharing a 32-token system prompt) | [hit rate 79%; prefill tokens −79%; peak pages 27 → 13; with ⅓ of the memory, 205 → 118 steps and TTFT p50 55 → 1 step](docs/EXPERIMENTS.md#2026-11-11-prefix-caching-on-a-shared-system-prompt-v9-b4) |
 
 ## Quickstart
 

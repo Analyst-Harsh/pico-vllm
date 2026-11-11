@@ -8,6 +8,9 @@ One step:
 Out of pages mid-decode: preempt the most recently admitted sequence (free its pages,
 recompute it later), as vLLM does.
 
+prefix_caching=True (B4): a newcomer reuses the cached pages of its longest shared prompt start
+and prefills only the rest.
+
 policy="static" is the baseline: a batch reserves pages for its full length, runs until its
 longest member is done (finished members keep their slot), and only then is the next admitted.
 """
@@ -86,6 +89,7 @@ class Engine:
         policy: str = "continuous",
         temperature: float = 0.0,
         top_k: int | None = None,
+        prefix_caching: bool = False,
     ) -> None:
         if policy not in ("continuous", "static"):
             raise ValueError(f"policy must be 'continuous' or 'static', got {policy!r}")
@@ -93,7 +97,13 @@ class Engine:
         self.device = next(model.parameters()).device
         sa = model.blocks[0].sa
         self.cache = PagedKVCache(
-            len(model.blocks), num_blocks, page_size, sa.n_kv_head, sa.head_size, device=self.device
+            len(model.blocks),
+            num_blocks,
+            page_size,
+            sa.n_kv_head,
+            sa.head_size,
+            device=self.device,
+            prefix_caching=prefix_caching,
         )
         self.max_num_seqs, self.policy = max_num_seqs, policy
         self.temperature, self.top_k = temperature, top_k
@@ -104,6 +114,8 @@ class Engine:
         self.stats: list[StepStats] = []
         self.step_no = 0
         self.preemptions = 0
+        self.prefill_computed = 0  # prompt tokens pushed through the model at prefill
+        self.prefill_cached = 0  # prompt tokens skipped thanks to prefix caching (B4)
         self._next_id = 0
 
     # ---- requests -------------------------------------------------------------------------
@@ -167,6 +179,8 @@ class Engine:
         cached = torch.tensor([len(s.tokens) - 1 for s in seqs], device=self.device)  # (B,)
         logits, _ = self.model(newest, cache=self.cache, start_pos=cached)  # one batched step
         self._emit(seqs, logits[:, -1, :])
+        for s in seqs:
+            self.cache.commit(s.seq_id, s.tokens[:-1])  # name any page that just filled up
         return len(seqs)
 
     def _make_room(self, seqs: list[Sequence]) -> list[Sequence]:
@@ -212,22 +226,28 @@ class Engine:
             length = len(s.tokens)
             if self.policy == "static":
                 length += s.max_new_tokens - len(s.output)  # reserve the full length
-            need = self.cache.blocks_needed(length)
+            need = self.cache.admission_cost(s.tokens, length)  # minus pages already shared
             if need > self.cache.allocator.num_free - reserved:
                 break  # FIFO: later, smaller requests don't jump the queue
             self.waiting.popleft()
             s.status = Status.RUNNING
             self.running.append(s)
+            before = len(s.tokens)
             self._prefill(s)
-            reserved += need - self.cache.blocks_needed(len(s.tokens) - 1)
+            reserved += self.cache.blocks_needed(length) - self.cache.blocks_needed(before)
             admitted += 1
         return admitted
 
     def _prefill(self, s: Sequence) -> None:
         # ponytail: one forward per newcomer; vLLM batches prefills and chunks long ones
+        skip = self.cache.attach_prefix(s.seq_id, s.tokens)  # B4: reuse cached prefix pages
         self.cache.bind([s.seq_id])
-        logits, _ = self.model(torch.tensor([s.tokens], device=self.device), cache=self.cache)
+        rest = torch.tensor([s.tokens[skip:]], device=self.device)
+        logits, _ = self.model(rest, cache=self.cache, start_pos=skip)  # only the uncached part
+        self.prefill_cached += skip
+        self.prefill_computed += len(s.tokens) - skip
         self._emit([s], logits[:, -1, :])
+        self.cache.commit(s.seq_id, s.tokens[:-1])
 
     def _emit(self, seqs: list[Sequence], logits: torch.Tensor) -> None:
         next_ids = sample_next(logits, self.temperature, self.top_k)[:, 0].tolist()

@@ -11,6 +11,22 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-11: prefix caching on a shared system prompt (v9 B4)
+- **Question:** when every request starts with the same system prompt, how much prefill and memory does prefix caching save, and does it change throughput?
+- **Setup:** Apple M5, torch 2.15.0, CPU. `checkpoints/gpt-m-gqa2.pt`, greedy, continuous batching, `max_num_seqs` 8, `page_size` 16. `uv run python -m pico_vllm.bench` (B4 table): 64 requests at 0.5/step, each = one shared 32-token system prompt (2 pages) + a 4–12 token user part, 4–16 new tokens, seed 1. Pool 32 pages (plenty) or 10 (tight), prefix caching off vs on. Branch `v9` after 5a8ced2 (uncommitted).
+- **Prediction:** not given.
+- **Result:** outputs equal one-at-a-time greedy with caching on, including under eviction and preemption (tests).
+
+  | pages | prefix cache | steps | tokens/step | TTFT p50 / p99 | TPOT p99 | preemptions | peak pages | prefill tokens | hit rate | wall (indicative) |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | 32 | off | 114 | 5.67 | 1 / 4 | 1.00 | 0 | 27 | 2,541 | 0% | 0.17 s |
+  | 32 | **on** | 114 | 5.67 | 1 / 4 | 1.00 | 0 | **13** | **525** | **79%** | 0.17 s |
+  | 10 | off | 205 | 3.15 | 55 / 94 | 1.40 | 13 | 10 | 3,115 | 0% | 0.22 s |
+  | 10 | **on** | **118** | **5.47** | **1 / 9** | 1.67 | 17 | 10 | **670** | **79%** | 0.18 s |
+
+- **Observations:** 79% of prompt tokens come from the cache (32 shared of ~40 per prompt, minus the first request), so prefill work drops 79% and, because the 2 system pages are stored once instead of per sequence, peak memory halves (27 → 13 pages). With plenty of memory, steps and TTFT don't move: our step count charges a prefill the same one step whatever its length, so the prefill saving is invisible in steps (on a real GPU it would cut TTFT directly). With tight memory the memory saving is what matters: more sequences fit, so steps drop 205 → 118 and median TTFT 55 → 1. Preemptions rise slightly (13 → 17) because more sequences run at once and compete for growth pages.
+- **Decision:** turn prefix caching on whenever prompts share a start (Fryday: system prompt, tools, a user's history). Its win shows up as prefill tokens saved and memory, so measure both; TTFT in steps under-reports it. Metric gap noted: steps don't weigh prefill length. Next: B5, read vLLM's scheduler and KV-cache manager.
+
 ## 2026-11-11: static vs continuous batching (v9 B3)
 - **Question:** on the same mixed workload, how much do continuous batching and paging beat static batching, and what does a memory-tight pool cost?
 - **Setup:** Apple M5, torch 2.15.0, CPU. `checkpoints/gpt-m-gqa2.pt`, greedy. `uv run python -m pico_vllm.bench` (defaults): 64 requests, Poisson arrivals at 0.5/step, prompts 4–16 chars, outputs 70% short (4–16) and 30% long (32 to ctx_len − prompt), seed 0. `max_num_seqs` 8, `page_size` 16. Pool: 32 pages (8 sequences × 64 positions, full) or 10 (tight). Static reserves each request's full length; continuous takes pages on demand and preempts (recompute) the newest sequence when out. Branch `v9` after acdf988 (uncommitted).

@@ -61,13 +61,13 @@ flowchart LR
 
 | Component | Job | Status |
 |---|---|---|
-| `Sequence` | a request's tokens and state: WAITING → RUNNING → FINISHED | planned (B3) |
-| `BlockAllocator` | free list of KV blocks; later ref counts | planned (B2) |
-| `BlockManager` | block table per sequence; prefix-hash map | planned (B2, B4) |
-| `Scheduler.step` | which sequences run this step, within the block and `max_num_seqs` budget | planned (B3) |
-| `Engine` | loop: schedule → build batch → forward → sample → append → free | planned (B3) |
-| Sampler | temperature, top-k | planned (F5) |
-| Metrics | see below | planned (B3) |
+| `Sequence` | a request's tokens, state (PENDING → WAITING → RUNNING → FINISHED; preempted → WAITING) and step stamps | `engine.py` (B3) |
+| `BlockAllocator` | free list of KV blocks (oldest freed first), ref counts, `share` | `kv_cache.py` (B2, B4) |
+| `BlockManager` | block table per sequence; page names → blocks for prefix reuse | `PagedKVCache` in `kv_cache.py` (B2, B4) |
+| `Scheduler.step` | decode → retire → admit FIFO within the page and `max_num_seqs` budget; preempt the newest when out of pages | `Engine.step` (B3) |
+| `Engine` | requests in, `step()` until done, per-step stats | `engine.py` (B3) |
+| Sampler | temperature, top-k, greedy | `sample.py` (F5) |
+| Metrics | see below | `bench.py` (B3, B4) |
 
 ## Metrics (v9 learn 3)
 One request: `arrival │ queue │ prefill │ tok1 │ tok2 │ … │ tokN`. **TTFT** = arrival → tok1, **TPOT** = gap between tokens, **E2E** = TTFT + (N−1)·TPOT.
@@ -98,6 +98,7 @@ What a production engine does that this one doesn't. Same columns as Fryday's `p
 | GQA k/v sharing | the kernel indexes k/v head `i // group` straight from the cache, no copy | no k/v copy (query groups folded into rows, F6), but plain torch ops: scores, mask, softmax and `@ v` are separate kernels | a fused kernel does it in one pass; matters at decode throughput | "GQA saves cache memory *and* bandwidth, but only if the kernel never materialises the repeat." | F6 |
 | Preemption | swap or recompute when memory runs out | recompute: free the newest sequence's pages, requeue it at the front, re-prefill prompt + output later (B3); no swap | long-tail requests | vLLM's recompute vs swap choice | setup |
 | Chunked prefill | splits long prompts across steps and batches prefills with decodes | whole prefill in one step, one forward per newcomer, separate from the batched decode | TTFT for other requests | prefill/decode interference | setup |
+| Prefix-cache hashing | strong hash of parent name + tokens (vLLM: optional SHA-256); linked free list for O(1) revive | Python `hash` of a tuple; `deque.remove` to revive a freed block (O(num_blocks)) | collisions would read another request's KV; scan cost grows with the pool | why the name chains the parent's name, and why the hash must be strong | B4 |
 | Context length | RoPE, long context | learned position embedding, so prompt + output ≤ `ctx_len` (`max_model_len`) | the engine must enforce it | why RoPE generalises and learned embeddings don't | setup |
 | Serving surface | OpenAI API server, tensor parallelism, many processes | single process, in-memory | — | how it would sit behind Fryday's OpenAI contract | setup |
 | Tokenizer | BPE | characters | fine for learning | why BPE changes the KV math | setup |

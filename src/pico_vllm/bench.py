@@ -32,14 +32,41 @@ def workload(
     return reqs
 
 
+def shared_workload(
+    n: int, rate: float, vocab: int, ctx_len: int, system_len: int = 32, seed: int = 1
+) -> list[tuple[list[int], int, int]]:
+    """B4: every prompt = one shared "system prompt" + a short user part (like Fryday)."""
+    rng = random.Random(seed)  # noqa: S311  (a seeded workload, not security)
+    system = [rng.randrange(vocab) for _ in range(system_len)]
+    reqs, t = [], 0.0
+    for _ in range(n):
+        t += rng.expovariate(rate)
+        user = [rng.randrange(vocab) for _ in range(rng.randint(4, 12))]
+        new = rng.randint(4, min(16, ctx_len - system_len - len(user)))
+        reqs.append((system + user, new, int(t)))
+    return reqs
+
+
 def pct(xs: list[float], q: float) -> float:
     xs = sorted(xs)
     return xs[min(len(xs) - 1, int(q * len(xs)))]
 
 
-def run(model: ModernGPT, reqs: list, policy: str, num_blocks: int, max_num_seqs: int) -> dict:
+def run(
+    model: ModernGPT,
+    reqs: list,
+    policy: str,
+    num_blocks: int,
+    max_num_seqs: int,
+    prefix_caching: bool = False,
+) -> dict:
     eng = Engine(
-        model, num_blocks=num_blocks, page_size=16, max_num_seqs=max_num_seqs, policy=policy
+        model,
+        num_blocks=num_blocks,
+        page_size=16,
+        max_num_seqs=max_num_seqs,
+        policy=policy,
+        prefix_caching=prefix_caching,
     )
     seqs = [eng.add_request(p, n, a) for p, n, a in reqs]
     t0 = time.perf_counter()
@@ -51,6 +78,7 @@ def run(model: ModernGPT, reqs: list, policy: str, num_blocks: int, max_num_seqs
     slots = sum(st.tokens + st.held for st in busy)
     return {
         "policy": policy,
+        "prefix cache": "on" if prefix_caching else "off",
         "pages": num_blocks,
         "steps": eng.step_no,
         "tok/step": sum(st.tokens for st in busy) / len(busy),
@@ -62,6 +90,8 @@ def run(model: ModernGPT, reqs: list, policy: str, num_blocks: int, max_num_seqs
         "TPOT p99": pct(tpot, 0.99),
         "preempt": eng.preemptions,
         "peak pages": max(st.blocks_used for st in eng.stats),
+        "prefill tok": eng.prefill_computed,
+        "hit rate": eng.prefill_cached / (eng.prefill_cached + eng.prefill_computed),
         "wall s": wall,
     }
 
@@ -83,11 +113,27 @@ def main() -> None:
         )
     reqs = workload(args.requests, args.rate, len(ck["chars"]), model.ctx_len)
     full = args.max_num_seqs * model.ctx_len // 16  # enough pages for every slot at full length
-    runs = [
-        run(model, reqs, "static", full, args.max_num_seqs),
-        run(model, reqs, "continuous", full, args.max_num_seqs),
-        run(model, reqs, "continuous", full // 3, args.max_num_seqs),  # memory-tight
-    ]
+    n = args.max_num_seqs
+    print("B3: mixed workload")
+    table(
+        [
+            run(model, reqs, "static", full, n),
+            run(model, reqs, "continuous", full, n),
+            run(model, reqs, "continuous", full // 3, n),  # memory-tight
+        ]
+    )
+    shared = shared_workload(args.requests, args.rate, len(ck["chars"]), model.ctx_len)
+    print("\nB4: shared 32-token system prompt")
+    table(
+        [
+            run(model, shared, "continuous", pages, n, prefix_caching=on)
+            for pages in (full, full // 3)
+            for on in (False, True)
+        ]
+    )
+
+
+def table(runs: list[dict]) -> None:
     cols = list(runs[0])
     print("| " + " | ".join(cols) + " |")
     print("|" + "---|" * len(cols))
