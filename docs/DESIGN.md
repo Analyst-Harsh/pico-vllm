@@ -46,33 +46,32 @@ Decode reads the whole cache every step, so this size sets both how many sequenc
 
 ```mermaid
 flowchart LR
-  REQ["add_request(prompt)"] --> WQ["waiting queue"]
-  WQ --> SCH["Scheduler.step"]
-  SCH <--> BM["BlockManager<br/>allocator · block tables · prefix hashes"]
-  SCH --> RUN["running batch"]
-  RUN --> ENG["Engine.step"]
-  ENG --> GPT["TinyGPT forward<br/>(paged K/V gather)"]
-  GPT <--> KV[("KV pool<br/>num_blocks × page_size")]
-  GPT --> SMP["sampler"] --> APP["append token"]
-  APP -- "done" --> FIN["finished → free blocks"]
-  APP -- "not done" --> SCH
-  ENG -.-> MET["metrics"]
+  REQ["Engine.add_request"] --> PEND["pending"]
+  PEND -- "arrival_step reached" --> WQ["waiting (FIFO)"]
+  WQ --> STEP["Engine.step<br>1. _decode (+ _make_room / _preempt)<br>2. _retire<br>3. _admit → _prefill"]
+  STEP <--> PKV["PagedKVCache<br>block tables · page names"]
+  PKV <--> BA["BlockAllocator<br>free list · ref counts"]
+  STEP --> GPT["ModernGPT forward<br>(gathers paged K/V)"]
+  GPT --> SMP["sampler.sample_next"]
+  SMP --> STEP
+  STEP -- "done" --> FIN["finished: pages freed"]
+  STEP -. "StepStats" .-> MET["bench.py metrics"]
 ```
 
-| Component | Job | Status |
+| Component | Job | File |
 |---|---|---|
-| `Sequence` | a request's tokens, state (PENDING → WAITING → RUNNING → FINISHED; preempted → WAITING) and step stamps | `engine.py` (B3) |
-| `BlockAllocator` | free list of KV blocks (oldest freed first), ref counts, `share` | `kv_cache.py` (B2, B4) |
-| `BlockManager` | block table per sequence; page names → blocks for prefix reuse | `PagedKVCache` in `kv_cache.py` (B2, B4) |
-| `Scheduler.step` | decode → retire → admit FIFO within the page and `max_num_seqs` budget; preempt the newest when out of pages | `Engine.step` (B3) |
-| `Engine` | requests in, `step()` until done, per-step stats | `engine.py` (B3) |
-| Sampler | temperature, top-k, greedy | `sample.py` (F5) |
-| Metrics | see below | `bench.py` (B3, B4) |
+| `Sequence` | a request's tokens, state (PENDING → WAITING → RUNNING → FINISHED; preempted → WAITING) and step stamps | [`serving/sequence.py`](../src/pico_vllm/serving/sequence.py) |
+| `BlockAllocator` | free list of KV pages (oldest freed first), ref counts, `share` | [`serving/block_allocator.py`](../src/pico_vllm/serving/block_allocator.py) |
+| `PagedKVCache` | block table per sequence; page names → blocks for prefix reuse | [`serving/paged_kv_cache.py`](../src/pico_vllm/serving/paged_kv_cache.py) |
+| `Engine.step` | decode → retire → admit FIFO within the page and `max_num_seqs` budget; preempt the newest when out of pages | [`serving/engine.py`](../src/pico_vllm/serving/engine.py) |
+| `Engine` | requests in, `step()` until done, per-step stats | [`serving/engine.py`](../src/pico_vllm/serving/engine.py) |
+| Sampler | temperature, top-k, greedy | [`sampler.py`](../src/pico_vllm/sampler.py) |
+| Metrics | see below | [`bench.py`](../src/pico_vllm/bench.py) |
 
 ## Metrics (v9 learn 3)
 One request: `arrival │ queue │ prefill │ tok1 │ tok2 │ … │ tokN`. **TTFT** = arrival → tok1, **TPOT** = gap between tokens, **E2E** = TTFT + (N−1)·TPOT.
 
-On MPS, wall-clock time for this tiny model is mostly launch overhead (EXPERIMENTS 2026-11-10), so the engine is measured in **steps** first. One step = one `Scheduler.step()` = one forward over the running batch.
+On MPS, wall-clock time for this tiny model is mostly launch overhead (EXPERIMENTS 2026-11-10), so the engine is measured in **steps** first. One step = one `Engine.step()` = one batched decode forward over the running sequences (plus a prefill per newcomer).
 
 | Metric | Definition (ours) | Production equivalent | Build |
 |---|---|---|---|
@@ -89,7 +88,7 @@ On MPS, wall-clock time for this tiny model is mostly launch overhead (EXPERIMEN
 **Rules:** report p50 and p99, never only the mean. Every run uses `bench.py`'s seeded workload. Sizing check (Little's law): in-flight sequences = arrival rate × steps per request, and each one holds its KV blocks.
 
 ## Gaps vs vLLM
-What a production engine does that this one doesn't. Same columns as Fryday's `production-gaps.md`.
+What a production engine does that this one doesn't. In the code, each one is marked with a `# Simplification:` comment.
 
 | Gap | What production does | What we do | Why / when it matters | Talking point | Added |
 |---|---|---|---|---|---|
@@ -102,8 +101,5 @@ What a production engine does that this one doesn't. Same columns as Fryday's `p
 | Context length | RoPE, long context | learned position embedding, so prompt + output ≤ `ctx_len` (`max_model_len`) | the engine must enforce it | why RoPE generalises and learned embeddings don't | setup |
 | Serving surface | OpenAI API server, tensor parallelism, many processes | single process, in-memory | — | how it would sit behind Fryday's OpenAI contract | setup |
 | Tokenizer | BPE | characters | fine for learning | why BPE changes the KV math | setup |
-| Attention heads | all heads in one batched matmul: q, k, v shaped `(B, n_head, T, head_size)`, fused SDPA / FlashAttention | a Python loop over `Head` modules, then `torch.cat` | 8 heads took 2× the wall time of 4 at equal params (EXPERIMENTS 2026-11-02); per-step overhead in v9 | why real code reshapes to a head dimension instead of looping | F5 |
+| Attention heads | fused SDPA / FlashAttention: scores, mask, softmax and `@ v` in one kernel | heads are a tensor dimension since the Llama-style step (`CausalSelfAttention`, `GroupedQueryAttention`), but attention is plain torch ops; the GPT-2-style `GPT` still loops over `Head` modules for teaching | 8 looped heads took 2× the wall time of 4 at equal params (EXPERIMENTS 2026-11-02) | why real code reshapes to a head dimension and fuses the kernel | F5 |
 | Type checking | strict type checker in CI | ruff only (torch types fight strict pyright) | low risk at this size | where types earn their keep | setup |
-
-## vLLM mapping (v9 B5)
-TBD: vLLM class or function → ours.

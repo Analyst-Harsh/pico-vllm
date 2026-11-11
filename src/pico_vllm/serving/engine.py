@@ -1,6 +1,7 @@
-"""v9 B3: a tiny serving engine. Continuous batching over the paged KV cache.
+"""What this file teaches: continuous batching, the scheduler loop of a serving engine.
 
-One step:
+Key idea: schedule per step, not per batch. A finished request leaves at once and a waiting
+one takes its slot in the same step, so the batch stays full. One step:
   1. decode one token for every running sequence (one batched forward),
   2. retire finished sequences and free their pages at once,
   3. admit waiting sequences (FIFO) while pages and max_num_seqs allow; each is prefilled
@@ -8,75 +9,24 @@ One step:
 Out of pages mid-decode: preempt the most recently admitted sequence (free its pages,
 recompute it later), as vLLM does.
 
-prefix_caching=True (B4): a newcomer reuses the cached pages of its longest shared prompt start
+prefix_caching=True: a newcomer reuses the cached pages of its longest shared prompt start
 and prefills only the rest.
 
 policy="static" is the baseline: a batch reserves pages for its full length, runs until its
 longest member is done (finished members keep their slot), and only then is the next admitted.
+
+Read next: bench.py (static vs continuous, prefix caching off vs on).
 """
 
 from collections import deque
-from dataclasses import dataclass, field
-from enum import Enum
 
 import torch
 
-from pico_vllm.kv_cache import OutOfBlocksError, PagedKVCache
-from pico_vllm.modern import ModernGPT
-from pico_vllm.sample import sample_next
-
-
-class Status(Enum):
-    PENDING = "pending"  # not arrived yet (benchmark workloads arrive at a given step)
-    WAITING = "waiting"  # arrived, or preempted, and queued
-    RUNNING = "running"
-    FINISHED = "finished"
-
-
-@dataclass
-class Sequence:
-    """One request and everything the scheduler and the metrics need to know about it."""
-
-    seq_id: int
-    prompt: list[int]
-    max_new_tokens: int
-    arrival_step: int = 0
-    status: Status = Status.PENDING
-    output: list[int] = field(default_factory=list)
-    first_token_step: int | None = None
-    finish_step: int | None = None
-    preemptions: int = 0
-
-    @property
-    def tokens(self) -> list[int]:
-        return self.prompt + self.output
-
-    @property
-    def done(self) -> bool:
-        return len(self.output) >= self.max_new_tokens
-
-    @property
-    def ttft(self) -> int | None:
-        """Steps from arrival to the first token; 1 = first token in the arrival step."""
-        if self.first_token_step is None:
-            return None
-        return self.first_token_step - self.arrival_step + 1
-
-    @property
-    def tpot(self) -> float | None:
-        """Steps per output token after the first; 1.0 = never paused or preempted."""
-        if self.first_token_step is None or self.finish_step is None or len(self.output) < 2:
-            return None
-        return (self.finish_step - self.first_token_step) / (len(self.output) - 1)
-
-
-@dataclass
-class StepStats:
-    step: int
-    tokens: int  # output tokens produced (= sequences that ran this step)
-    running: int  # batch size after admission (static: includes finished-but-held)
-    held: int  # static only: finished sequences still holding a batch slot
-    blocks_used: int
+from pico_vllm.model.llama_style import ModernGPT
+from pico_vllm.sampler import sample_next
+from pico_vllm.serving.block_allocator import OutOfBlocksError
+from pico_vllm.serving.paged_kv_cache import PagedKVCache
+from pico_vllm.serving.sequence import Sequence, Status, StepStats
 
 
 class Engine:
@@ -115,7 +65,7 @@ class Engine:
         self.step_no = 0
         self.preemptions = 0
         self.prefill_computed = 0  # prompt tokens pushed through the model at prefill
-        self.prefill_cached = 0  # prompt tokens skipped thanks to prefix caching (B4)
+        self.prefill_cached = 0  # prompt tokens skipped thanks to prefix caching
         self._next_id = 0
 
     # ---- requests -------------------------------------------------------------------------
@@ -196,7 +146,7 @@ class Engine:
         return seqs
 
     def _preempt(self, s: Sequence) -> None:
-        # ponytail: recompute only (re-prefill prompt + output later); vLLM v0 could also swap
+        # Simplification: recompute only (re-prefill prompt + output later); vLLM v0 could also swap
         self.cache.free_seq(s.seq_id)
         self.running.remove(s)
         s.status = Status.WAITING
@@ -239,8 +189,8 @@ class Engine:
         return admitted
 
     def _prefill(self, s: Sequence) -> None:
-        # ponytail: one forward per newcomer; vLLM batches prefills and chunks long ones
-        skip = self.cache.attach_prefix(s.seq_id, s.tokens)  # B4: reuse cached prefix pages
+        # Simplification: one forward per newcomer; vLLM batches prefills and chunks long ones
+        skip = self.cache.attach_prefix(s.seq_id, s.tokens)  # reuse cached prefix pages
         self.cache.bind([s.seq_id])
         rest = torch.tensor([s.tokens[skip:]], device=self.device)
         logits, _ = self.model(rest, cache=self.cache, start_pos=skip)  # only the uncached part

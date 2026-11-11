@@ -1,10 +1,10 @@
-"""v9 B1: KV cache. Cached results must equal recomputing everything."""
+"""The KV cache. Cached results must equal recomputing everything."""
 
 import pytest
 import torch
 
-from pico_vllm.kv_cache import KVCache
-from pico_vllm.modern import ModernGPT
+from pico_vllm.model.llama_style import ModernGPT
+from pico_vllm.serving.kv_cache import KVCache
 
 V, C, NH, NL, CTX = 65, 16, 4, 2, 32
 

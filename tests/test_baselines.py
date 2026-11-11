@@ -1,9 +1,9 @@
-"""F4 step 2 target: BigramLanguageModel in src/pico_vllm/model.py."""
+"""The warm-up models: bigram and single head (model/baselines.py)."""
 
 import pytest
 import torch
 
-from pico_vllm.model import BigramLanguageModel, SingleHeadLanguageModel
+from pico_vllm.model.baselines import BigramLanguageModel, SingleHeadLanguageModel
 
 V, B, T = 10, 2, 5
 

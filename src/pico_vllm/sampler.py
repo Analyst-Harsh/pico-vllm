@@ -1,6 +1,10 @@
-"""F5 step 3: the sampler. Turns last-position logits into the next token id.
+"""What this file teaches: how logits become the next token id.
 
-v9's engine calls this once per running sequence per step.
+Key idea: divide by temperature (<1 sharpens, >1 flattens), keep only the top_k scores, softmax,
+then draw one id. temperature 0 is greedy argmax. The engine calls this once per step for
+the whole running batch.
+
+Read next: model/llama_style.py.
 """
 
 import torch

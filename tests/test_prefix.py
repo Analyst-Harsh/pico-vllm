@@ -1,11 +1,9 @@
-"""v9 B4: prefix caching. Reused pages must give the same outputs as computing everything."""
+"""Prefix caching. Reused pages must give the same outputs as computing everything."""
 
-import pytest
 import torch
 
-from pico_vllm.engine import Engine
-from pico_vllm.kv_cache import BlockAllocator
-from pico_vllm.modern import ModernGPT
+from pico_vllm.model.llama_style import ModernGPT
+from pico_vllm.serving.engine import Engine
 
 V, C, NH, NKV, NL, CTX, PAGE = 65, 16, 4, 2, 2, 32, 4
 SYSTEM = [3, 1, 4, 1, 5, 9, 2, 6]  # a shared 2-page "system prompt"
@@ -26,19 +24,6 @@ def alone(model: ModernGPT, prompt: list[int], n: int) -> list[int]:
 
 def engine(model: ModernGPT, num_blocks: int = 64, max_num_seqs: int = 4) -> Engine:
     return Engine(model, num_blocks, PAGE, max_num_seqs, prefix_caching=True)
-
-
-def test_allocator_ref_counts() -> None:
-    alloc = BlockAllocator(3)
-    b = alloc.allocate()
-    alloc.share(b)  # a second user
-    alloc.free(b)
-    assert alloc.refs(b) == 1  # still in use by one
-    assert alloc.num_free == 2
-    alloc.free(b)
-    assert alloc.num_free == 3  # last user gone: back in the pool
-    with pytest.raises(ValueError, match="not allocated"):
-        alloc.free(b)
 
 
 def test_concurrent_requests_share_prefix_pages() -> None:

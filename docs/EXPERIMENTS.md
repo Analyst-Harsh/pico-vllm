@@ -1,5 +1,7 @@
 # Experiments
 
+> Notes like "uncommitted" or a branch name record the working tree at run time. File paths (`model.py`, `modern.py`, `kv_cache.py`, `engine.py`, `sample.py`) are from before the code moved into `model/` and `serving/`.
+
 Every result, including negative ones, newest first. Write down the prediction **before** the run.
 
 ```

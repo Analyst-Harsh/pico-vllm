@@ -1,9 +1,9 @@
-"""F5 step 3 target: src/pico_vllm/sample.py."""
+"""The sampler: temperature, top-k, greedy (sampler.py)."""
 
 import pytest
 import torch
 
-from pico_vllm.sample import next_token_probs, sample_next
+from pico_vllm.sampler import next_token_probs, sample_next
 
 LOGITS = torch.tensor(
     [
