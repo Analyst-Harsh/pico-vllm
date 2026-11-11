@@ -7,6 +7,8 @@ one token per step instead of recomputing the whole window. (No RoPE or SwiGLU.)
 Read next: train.py (how every model here was trained), then serving/kv_cache.py.
 """
 
+from collections.abc import Iterator
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
@@ -135,9 +137,24 @@ class ModernGPT(GPT):
         generator: torch.Generator | None = None,
         cache: KVCache | PagedKVCache | None = None,
     ) -> Tensor:
-        """Prefill the prompt once, then feed one token per step.
+        """All of stream_cached()'s tokens appended to idx: (B, T) -> (B, T + max_new_tokens)."""
+        new = self.stream_cached(idx, max_new_tokens, temperature, top_k, generator, cache)
+        return torch.cat((idx, *new), dim=1)
 
-        Learned positions: prompt + new tokens must fit in ctx_len (no cropping like generate).
+    @torch.no_grad()
+    def stream_cached(
+        self,
+        idx: Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        generator: torch.Generator | None = None,
+        cache: KVCache | PagedKVCache | None = None,
+    ) -> Iterator[Tensor]:
+        """Yield each new token (B, 1) the moment it's picked. Prefill the prompt once, then
+        feed one token per step.
+
+        Learned positions: prompt + new tokens must fit in ctx_len (no cropping like stream).
         cache: an empty cache to fill (e.g. a PagedKVCache); default a contiguous one.
         """
         B, T = idx.shape
@@ -147,7 +164,6 @@ class ModernGPT(GPT):
         logits, _ = self(idx, cache=cache, start_pos=0)  # prefill: whole prompt, fills the cache
         for i in range(max_new_tokens):
             idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)  # (B, 1)
-            idx = torch.cat((idx, idx_next), dim=1)  # (B, T + i + 1)
+            yield idx_next
             if i < max_new_tokens - 1:  # decode: only the new token goes through the model
                 logits, _ = self(idx_next, cache=cache, start_pos=T + i)
-        return idx
