@@ -51,7 +51,10 @@ def test_paged_update_matches_contiguous_across_page_boundaries() -> None:
         pk, pv = pages.update(1, start, k, v)
         assert torch.equal(pk, fk)
         assert torch.equal(pv, fv)
-    assert [len(t) for t in pages.block_tables] == [3, 3]  # 11 positions / page 4 -> 3 pages
+    assert [len(t) for t in pages.block_tables.values()] == [
+        3,
+        3,
+    ]  # 11 positions / page 4 -> 3 pages
 
 
 def test_paged_generate_equals_contiguous_generate() -> None:
@@ -62,7 +65,7 @@ def test_paged_generate_equals_contiguous_generate() -> None:
     out = model.generate_cached(prompt, max_new_tokens=20, temperature=0, cache=cache)
     assert torch.equal(out, flat)
     # 24 positions written (the last sampled token is never fed back): 6 pages each, not 32
-    assert [len(t) for t in cache.block_tables] == [6, 6]
+    assert [len(t) for t in cache.block_tables.values()] == [6, 6]
     used = cache.block_tables[0] + cache.block_tables[1]
     assert len(set(used)) == len(used)  # no block shared between the two sequences
     cache.free()

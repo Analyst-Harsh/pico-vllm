@@ -24,12 +24,13 @@ It's a sibling of [**Fryday**](https://github.com/Analyst-Harsh/Fryday), my loca
 
 | Milestone | What it adds | Status |
 |---|---|---|
-| F4 | Character tokenizer, bigram baseline, one self-attention head | ⏳ next |
-| F5 | Full tiny GPT trained on MPS, sampler, attention-weight inspection | ⏳ |
-| v9.1 | KV cache | ⏳ |
-| v9.2 | Paged KV: block allocator, block tables | ⏳ |
-| v9.3 | Continuous batching: scheduler, engine loop, static-batching baseline | ⏳ |
-| v9.4 | Prefix caching: block hashing, ref counts | ⏳ |
+| F4 | Character tokenizer, bigram baseline, one self-attention head | ✅ |
+| F5 | Full tiny GPT trained on MPS, sampler, attention-weight inspection | ✅ |
+| F6 | Llama-style changes: batched heads, RMSNorm, grouped-query attention | ✅ |
+| v9.1 | KV cache | ✅ |
+| v9.2 | Paged KV: block allocator, block tables | ✅ |
+| v9.3 | Continuous batching: scheduler, engine loop, static-batching baseline | ✅ |
+| v9.4 | Prefix caching: block hashing, ref counts | ⏳ next |
 
 ## Architecture (the target)
 
@@ -58,8 +59,8 @@ Filled in as each milestone lands. Every number links to its entry in [EXPERIMEN
 
 | Measurement | Result |
 |---|---|
-| Val loss: bigram → one head → full GPT | TBD |
-| Static vs continuous batching: tokens/step, utilisation, TTFT, TPOT | TBD |
+| Val loss: bigram → one head → full GPT | [2.49](docs/EXPERIMENTS.md#2026-11-01-bigram-baseline-on-tiny-shakespeare-f4) → [2.41](docs/EXPERIMENTS.md#2026-11-01-one-attention-head-vs-bigram-f4) → [1.585](docs/EXPERIMENTS.md#2026-11-02-run-b-wider-gpt--ctx-64-dropout-02-vs-0-f5) |
+| Static vs continuous batching (64 mixed requests, 8 slots) | [2.1× fewer steps; tokens/step 3.3 → 7.1; utilisation 41% → 89%; TTFT p50 139 → 8 steps](docs/EXPERIMENTS.md#2026-11-11-static-vs-continuous-batching-v9-b3) |
 | Prefix caching: hit rate, prefill tokens saved | TBD |
 
 ## Quickstart

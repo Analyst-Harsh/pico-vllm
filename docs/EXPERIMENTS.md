@@ -11,6 +11,37 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-11: static vs continuous batching (v9 B3)
+- **Question:** on the same mixed workload, how much do continuous batching and paging beat static batching, and what does a memory-tight pool cost?
+- **Setup:** Apple M5, torch 2.15.0, CPU. `checkpoints/gpt-m-gqa2.pt`, greedy. `uv run python -m pico_vllm.bench` (defaults): 64 requests, Poisson arrivals at 0.5/step, prompts 4–16 chars, outputs 70% short (4–16) and 30% long (32 to ctx_len − prompt), seed 0. `max_num_seqs` 8, `page_size` 16. Pool: 32 pages (8 sequences × 64 positions, full) or 10 (tight). Static reserves each request's full length; continuous takes pages on demand and preempts (recompute) the newest sequence when out. Branch `v9` after acdf988 (uncommitted).
+- **Prediction:** not given.
+- **Result:** outputs equal one-at-a-time greedy for both policies, with and without preemption (tests).
+
+  | Policy | pages | steps | tokens/step | utilisation | padding waste | TTFT p50 / p99 (steps) | TPOT p50 / p99 (steps) | preemptions | peak pages | wall (indicative) |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | static | 32 | 421 | 3.29 | 41% | 56% | 139 / 247 | 1.00 / 1.00 | 0 | 23 | 0.36 s |
+  | **continuous** | 32 | **197** | **7.08** | **89%** | 0% | **8 / 22** | 1.00 / 1.00 | 0 | 23 | 0.27 s |
+  | continuous, tight | 10 | 312 | 4.45 | 56% | 0% | 58 / 118 | 1.00 / 6.40 | 55 | 10 | 0.34 s |
+
+- **Observations:** continuous finishes the same work in **2.1× fewer steps** (2.2× tokens/step), and median TTFT drops from 139 to 8 steps: in static, a request arriving mid-batch waits for the batch's longest member, and 56% of batch slots are held by finished sequences. TPOT is 1.0 for both when memory is plentiful: once running, every sequence gets a token every step. With a third of the pages, continuous still beats static on every number (312 steps, TTFT p50 58) but pays in preemptions (55): p99 TPOT rises to 6.4 because preempted sequences sit out and are recomputed. Wall-clock barely moves (0.27–0.36 s): on this tiny model a step's cost is mostly fixed overhead, so steps saved ≠ time saved here.
+- **Decision:** continuous batching is the engine default. Memory sets the ceiling: below what the workload's concurrency needs, preemption keeps outputs right but shows up first in p99 TPOT, so watch preemptions and p99, not averages. Next: B4 prefix caching.
+
+## 2026-11-11: paged KV memory held vs contiguous (v9 B2)
+- **Question:** how many KV slots does the paged cache hold compared with B1's ctx_len-per-sequence box?
+- **Setup:** `checkpoints/gpt-m-gqa2.pt`, CPU, batch 3, 7-token prompt, `PagedKVCache(page_size=16, num_blocks=32)`. Contiguous holds 3 × 64 = 192 slots whatever the length. Commit acdf988.
+- **Prediction:** not given.
+- **Result:** paged output equals contiguous (tests + checkpoint check).
+
+  | new tokens | positions cached / seq | pages / seq | slots held (paged) | vs contiguous |
+  |---|---|---|---|---|
+  | 10 | 16 | 1 | 48 | 25% |
+  | 20 | 26 | 2 | 96 | 50% |
+  | 50 | 56 | 4 | 192 | 100% |
+
+  Sampled run (temperature 0.8, top-k 20, seed 1337, 50 new): block tables `[31, 28, 25, 22]`, `[30, 27, 24, 21]`, `[29, 26, 23, 20]`; pool 20/32 free during, 32/32 after `free()`.
+- **Observations:** the saving is exactly the unused tail: short outputs hold a quarter of the memory, and outputs near ctx_len save nothing (4 × 16 = 64 = ctx_len). Pages interleave across sequences because all three grow in lockstep, so each sequence's pages are scattered: the block table is doing real work. Waste per sequence is under one page.
+- **Decision:** paging pays off when lengths vary and most stop well before ctx_len, which is B3's mixed workload. Measure KV block usage there.
+
 ## 2026-11-11: KV cache vs recompute (v9 B1)
 - **Question:** how much faster is `generate_cached` than `generate`, and does per-token cost grow with position?
 - **Setup:** Apple M5, torch 2.15.0. `checkpoints/gpt-m-gqa2.pt` (ModernGPT, RMSNorm, 4 query / 2 k/v heads, ctx_len 64), batch 1, prompt = 1 token, greedy. Median of 5 runs after a warm-up, MPS (with `torch.mps.synchronize`) and CPU. Branch `v9` after 914d11c (uncommitted). Script in the session scratchpad (`time_kv.py`).

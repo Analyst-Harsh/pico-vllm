@@ -12,6 +12,12 @@ from pico_vllm.kv_cache import KVCache, PagedKVCache
 from pico_vllm.sample import sample_next
 
 
+def positions(start_pos: int | Tensor, T: int, device: torch.device) -> Tensor:
+    """Positions of a T-token chunk: (1, T) for one int start, (B, T) for a start per row."""
+    starts = start_pos.view(-1, 1) if isinstance(start_pos, Tensor) else torch.tensor([[start_pos]])
+    return starts.to(device) + torch.arange(T, device=device)
+
+
 class GroupedQueryAttention(nn.Module):
     """GQA: n_head query heads share n_kv_head key/value heads. F6 step 3.
 
@@ -43,9 +49,12 @@ class GroupedQueryAttention(nn.Module):
         x: Tensor,
         cache: KVCache | PagedKVCache | None = None,
         layer: int = 0,
-        start_pos: int = 0,
+        start_pos: int | Tensor = 0,
     ) -> Tensor:
-        """x (B, T, n_embd) -> (B, T, n_embd). x holds positions [start_pos, start_pos + T)."""
+        """x (B, T, n_embd) -> (B, T, n_embd). x holds positions [start_pos, start_pos + T).
+
+        start_pos is one int for the whole batch, or a (B,) tensor: one start per sequence (B3).
+        """
         B, T, C = x.shape
         hs, nh, nkv = self.head_size, self.n_head, self.n_kv_head
         g = nh // nkv  # query heads per k/v head (the group size)
@@ -64,8 +73,9 @@ class GroupedQueryAttention(nn.Module):
         # 4. attention: every row of the stack meets its group's one k/v head
         wei = q @ k.transpose(-2, -1) * hs**-0.5  # (B, nkv, g*T, Tk)
         # mask rows = this chunk's positions, columns = every key position up to the last one
-        mask = self.tril[start_pos : start_pos + T, :Tk]  # (T, Tk)
-        wei = wei.view(B, nkv, g, T, Tk).masked_fill(mask == 0, float("-inf"))
+        mask = self.tril[positions(start_pos, T, x.device)][..., :Tk]  # (B or 1, T, Tk)
+        # a shorter sequence's padded keys sit past its own position, so this hides them too
+        wei = wei.view(B, nkv, g, T, Tk).masked_fill(mask[:, None, None] == 0, float("-inf"))
         wei = F.softmax(wei, dim=-1).view(B, nkv, g * T, Tk)
         out = wei @ v  # (B, nkv, g*T, hs)
         # 5. unfold back to nh heads, heads side by side, mix
@@ -116,7 +126,7 @@ class ModernBlock(model.Block):
         x: Tensor,
         cache: KVCache | PagedKVCache | None = None,
         layer: int = 0,
-        start_pos: int = 0,
+        start_pos: int | Tensor = 0,
     ) -> Tensor:
         """Same as Block, plus the cache handed down to attention."""
         x = x + self.sa(self.ln1(x), cache, layer, start_pos)
@@ -153,13 +163,16 @@ class ModernGPT(model.GPT):
         idx: Tensor,
         targets: Tensor | None = None,
         cache: KVCache | PagedKVCache | None = None,
-        start_pos: int = 0,
+        start_pos: int | Tensor = 0,
     ) -> tuple[Tensor, Tensor | None]:
-        """idx (B, T) holds positions [start_pos, start_pos + T). No cache: start_pos is 0."""
+        """idx (B, T) holds positions [start_pos, start_pos + T). No cache: start_pos is 0.
+
+        start_pos may be a (B,) tensor when the sequences in the batch are at different points.
+        """
         _, T = idx.shape
-        if start_pos + T > self.ctx_len:
-            raise ValueError(f"positions up to {start_pos + T} exceed ctx_len={self.ctx_len}")
-        pos = torch.arange(start_pos, start_pos + T, device=idx.device)  # real positions
+        pos = positions(start_pos, T, idx.device)  # (B or 1, T): real positions
+        if int(pos.max()) >= self.ctx_len:
+            raise ValueError(f"positions up to {int(pos.max()) + 1} exceed ctx_len={self.ctx_len}")
         x = self.token_embedding_table(idx) + self.position_embedding_table(pos)
         for layer, block in enumerate(self.blocks):
             x = block(x, cache, layer, start_pos)
