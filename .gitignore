@@ -9,3 +9,5 @@ __pycache__/
 /data/
 /checkpoints/
 /dist/
+docs/video/
+docs/assets/demo.mp4

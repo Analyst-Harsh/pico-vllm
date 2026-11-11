@@ -9,6 +9,7 @@ Read next: serving/kv_cache.py.
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import torch
@@ -53,6 +54,23 @@ CONFIGS["gpt-m-rms"] = {**CONFIGS["gpt-m-csa"], "rmsnorm": True}
 # GQA: query heads stay 4, k/v heads 2 and 1 (4 = gpt-m-rms)
 CONFIGS["gpt-m-gqa2"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 2}
 CONFIGS["gpt-m-gqa1"] = {**CONFIGS["gpt-m-rms"], "n_kv_head": 1}
+# Large: Karpathy's "Let's build GPT" final size, Llama-style (~9.6M params, ctx 256).
+# A longer context makes the KV cache's saving visible; long run, so keep the best checkpoint.
+CONFIGS["gpt-l-gqa"] = {
+    "B": 64,
+    "T": 256,
+    "max_iters": 5000,
+    "lr": 3e-4,
+    "n_embd": 384,
+    "n_head": 6,
+    "n_kv_head": 2,
+    "n_layer": 6,
+    "dropout": 0.2,
+    "modern": True,
+    "rmsnorm": True,
+    "save_best": True,  # save whenever val improves, so an interrupted run still leaves a model
+    "eval_iters": 50,  # 200 batches per split is overkill at this size: saves ~10 of ~63 min
+}
 
 
 def pick_device() -> str:
@@ -61,14 +79,19 @@ def pick_device() -> str:
 
 @torch.no_grad()
 def estimate_loss(
-    model: nn.Module, splits: dict[str, Tensor], B: int, T: int, device: str
+    model: nn.Module,
+    splits: dict[str, Tensor],
+    B: int,
+    T: int,
+    device: str,
+    iters: int = EVAL_ITERS,
 ) -> dict[str, float]:
-    """Average loss over EVAL_ITERS batches for each split. Less noisy than one batch."""
+    """Average loss over `iters` batches for each split. Less noisy than one batch."""
     model.eval()
     out = {}
     for name, data in splits.items():
-        losses = torch.zeros(EVAL_ITERS)
-        for k in range(EVAL_ITERS):
+        losses = torch.zeros(iters)
+        for k in range(iters):
             x, y = get_batch(data, B, T, device)
             _, loss = model(x, y)
             losses[k] = loss.item()
@@ -96,6 +119,12 @@ def build(
     return GPT(vocab_size, ctx_len=cfg["T"], **sizes)
 
 
+def save(model: nn.Module, cfg: dict, tok: CharTokenizer, path: Path, why: str) -> None:
+    path.parent.mkdir(exist_ok=True)
+    torch.save({"model": model.state_dict(), "config": cfg, "chars": tok.itos}, path)
+    print(f"saved {path} ({why})", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=CONFIGS, default="gpt")
@@ -116,11 +145,21 @@ def main() -> None:
     model = build(name, tok.vocab_size, cfg).to(device)
     print(f"{name}: {sum(p.numel() for p in model.parameters()):,} params on {device}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"])
+    path = CHECKPOINT_DIR / f"{name}.pt"
+    best_val, t0 = float("inf"), time.perf_counter()
 
     for step in range(max_iters):
         if step % eval_interval == 0 or step == max_iters - 1:
-            losses = estimate_loss(model, splits, B, T, device)
-            print(f"step {step:4d}: train {losses['train']:.4f}, val {losses['val']:.4f}")
+            losses = estimate_loss(model, splits, B, T, device, cfg.get("eval_iters", EVAL_ITERS))
+            elapsed = time.perf_counter() - t0
+            print(
+                f"step {step:4d}: train {losses['train']:.4f}, val {losses['val']:.4f}"
+                f"  ({elapsed / 60:.1f} min)",
+                flush=True,
+            )
+            if cfg.get("save_best") and losses["val"] < best_val:
+                best_val = losses["val"]
+                save(model, cfg, tok, path, f"best val {best_val:.4f} at step {step}")
 
         x, y = get_batch(train, B, T, device)
         _, loss = model(x, y)
@@ -128,11 +167,8 @@ def main() -> None:
         loss.backward()
         optimizer.step()
 
-    if isinstance(model, GPT):  # the engine serves one of these
-        path = CHECKPOINT_DIR / f"{name}.pt"
-        path.parent.mkdir(exist_ok=True)
-        torch.save({"model": model.state_dict(), "config": cfg, "chars": tok.itos}, path)
-        print(f"saved {path}")
+    if isinstance(model, GPT) and not cfg.get("save_best"):  # the engine serves one of these
+        save(model, cfg, tok, path, "final step")
 
     prompt = torch.zeros((1, 1), dtype=torch.long, device=device)  # id 0 = '\n'
     print(tok.decode(model.generate(prompt, max_new_tokens=500)[0].tolist()))

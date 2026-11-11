@@ -7,6 +7,8 @@ lm_head and you have a GPT.
 Read next: sampler.py (turning logits into the next token), then model/llama_style.py.
 """
 
+from collections.abc import Iterator
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
@@ -107,10 +109,24 @@ class GPT(nn.Module):
         top_k: int | None = None,
         generator: torch.Generator | None = None,
     ) -> Tensor:
-        """Crop to ctx_len, predict, sample, append. Recomputes the whole window every token;
-        ModernGPT.generate_cached removes that work with a KV cache."""
+        """All of stream()'s tokens appended to idx: (B, T) -> (B, T + max_new_tokens)."""
+        new = self.stream(idx, max_new_tokens, temperature, top_k, generator)
+        return torch.cat((idx, *new), dim=1)
+
+    @torch.no_grad()
+    def stream(
+        self,
+        idx: Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Iterator[Tensor]:
+        """Yield each new token (B, 1) the moment it's picked. Crop to ctx_len, predict, sample,
+        append: the whole window is recomputed every token; ModernGPT.stream_cached removes
+        that work with a KV cache."""
         for _ in range(max_new_tokens):
             logits, _ = self(idx[:, -self.ctx_len :])
             idx_next = sample_next(logits[:, -1, :], temperature, top_k, generator)
             idx = torch.cat((idx, idx_next), dim=1)  # (B, T + 1)
-        return idx
+            yield idx_next

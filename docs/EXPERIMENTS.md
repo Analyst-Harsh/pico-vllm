@@ -13,6 +13,28 @@ Every result, including negative ones, newest first. Write down the prediction *
 - **Decision:**
 ```
 
+## 2026-11-12: a 9.6M-param model with 256 context, and the KV cache on it
+- **Question:** (1) how far does Karpathy's final "Let's build GPT" size get in our Llama-style model, and (2) with 4× more context and 13× more parameters, does the KV cache now save real time?
+- **Setup:** Apple M5, torch 2.15.0. `gpt-l-gqa`: ModernGPT, n_embd 384, 6 layers, 6 query / 2 k/v heads, RMSNorm, ctx_len 256, dropout 0.2, **9,604,289 params**. B=64, T=256, AdamW 3e-4, 5000 iters, eval 50 batches/split every 500 steps, `save_best` (keep the lowest-val checkpoint). Seed 1337, MPS. Branch `train-large` at 8a1b139. `uv run python -m pico_vllm.train --model gpt-l-gqa`. Then `uv run python -m pico_vllm.generate --checkpoint gpt-l-gqa --prompt "ROMEO:" --compare --device {mps,cpu}` (greedy, 250 new tokens, one warm-up each) at 2c28e55.
+- **Prediction:** not given.
+- **Result, training:** wall time 65.9 min (indicative).
+
+  | step | 0 | 500 | 1000 | 1500 | **2000** | 2500 | 3000 | 4000 | 4999 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | train | 4.20 | 1.69 | 1.34 | 1.22 | 1.13 | 1.05 | 0.98 | 0.83 | 0.69 |
+  | val | 4.20 | 1.86 | 1.59 | 1.51 | **1.497** | 1.52 | 1.53 | 1.62 | 1.73 |
+
+  Saved checkpoint: step 2000, **val 1.4970** (vs 1.585 for the best small model; Karpathy reports ~1.48 at this size). Sample (temperature 0.8, seed 1337): *"ROMEO: / And now are becomes me to sleep it. // NORTHUMBERLAND: / I do not speak it. But they show thee at their husband / Death at have unform'd their honour swains. // HENRY BOLINGBROKE: / My life for less is hither than his:"*
+- **Result, KV cache:** text identical with and without the cache on both devices. Positions pushed through the model: **32,625 without, 255 with (128× less work)**.
+
+  | device | no cache | KV cache | speed-up |
+  |---|---|---|---|
+  | CPU | 4.7 ms/token | **1.0 ms/token** | **4.7×** |
+  | MPS | 5.6 ms/token | 8.1 ms/token | **0.7× (slower)** |
+
+- **Observations:** the model overfits after step 2000: train keeps falling to 0.69 while val climbs to 1.73. `save_best` kept the step-2000 weights, so the overfit tail cost nothing; 2000 steps (~25 min) would have been enough. On CPU the cache finally pays: 4.7× faster (vs 1.1–1.4× on the small model), because re-reading 256 positions through 6 wide layers is real arithmetic. On MPS it's the opposite: the GPU runs a 256-position forward as fast as a 1-position one (each step is launch-bound at ~5–8 ms either way), and the cached path adds per-layer work: writing into the cache and building a per-step positions tensor and mask, which on MPS means extra small kernels and host-to-device copies. Not yet profiled.
+- **Decision:** keep `gpt-l-gqa` (step 2000) as the demo model. Report the KV cache as 128× less work everywhere and 4.7× faster on CPU; don't claim a GPU speed-up. Next: try removing the per-step tensor creation on the int-`start_pos` path (slice `tril` directly, as B1 did) and re-measure MPS.
+
 ## 2026-11-11: prefix caching on a shared system prompt (v9 B4)
 - **Question:** when every request starts with the same system prompt, how much prefill and memory does prefix caching save, and does it change throughput?
 - **Setup:** Apple M5, torch 2.15.0, CPU. `checkpoints/gpt-m-gqa2.pt`, greedy, continuous batching, `max_num_seqs` 8, `page_size` 16. `uv run python -m pico_vllm.bench` (B4 table): 64 requests at 0.5/step, each = one shared 32-token system prompt (2 pages) + a 4–12 token user part, 4–16 new tokens, seed 1. Pool 32 pages (plenty) or 10 (tight), prefix caching off vs on. Branch `v9` after 5a8ced2 (uncommitted).
